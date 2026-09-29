@@ -1,5 +1,5 @@
 # MuMuAINovel 📚✨
-
+bản fork lại của https://github.com/xiamuceer-j/MuMuAINovel
 <div align="center">
 
 ![Version](https://img.shields.io/badge/version-1.5.6-blue.svg)
