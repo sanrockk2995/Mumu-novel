@@ -1,0 +1,94 @@
+"""Gemini hình ảnh bìa Provider"""
+from __future__ import annotations
+
+import base64
+from typing import Any
+
+import httpx
+
+from app.logger import get_logger, safe_preview
+from app.services.cover_providers.base_cover_provider import BaseCoverProvider, CoverGenerationResult
+
+logger = get_logger(__name__)
+
+
+class GeminiCoverProvider(BaseCoverProvider):
+    """Triển khai tạo bìa dựa trên Gemini API"""
+
+    def __init__(self, api_key: str, base_url: str):
+        self.api_key = api_key
+        self.base_url = (base_url or "https://generativelanguage.googleapis.com/v1beta").rstrip("/")
+
+    async def generate_cover(
+        self,
+        *,
+        prompt: str,
+        model: str,
+        width: int,
+        height: int,
+    ) -> CoverGenerationResult:
+        url = f"{self.base_url}/models/{model}:generateContent"
+        payload: dict[str, Any] = {
+            "contents": [{
+                "role": "user",
+                "parts": [{
+                    "text": (
+                        f"{prompt}\n\n"
+                        f"Generate a final cover image at {width}x{height} pixels. "
+                        "Return one final cover image."
+                    )
+                }]
+            }],
+            "generationConfig": {
+                "temperature": 0.4,
+            },
+        }
+        headers = {
+            "x-goog-api-key": self.api_key,
+            "Content-Type": "application/json",
+        }
+
+        try:
+            async with httpx.AsyncClient(timeout=120.0) as client:
+                response = await client.post(url, headers=headers, json=payload)
+
+            response.raise_for_status()
+            data = response.json()
+        except httpx.HTTPStatusError as exc:
+            logger.error(
+                "Gemini Tạo bìa HTTP lỗi: status=%s response=%s",
+                exc.response.status_code if exc.response else None,
+                safe_preview(exc.response.text, 500) if exc.response is not None else None,
+            )
+            raise
+        except Exception:
+            logger.error("Gemini yêu cầu tạo bìa gặp ngoại lệ", exc_info=True)
+            raise
+
+        candidates = data.get("candidates") or []
+        if not candidates:
+            raise ValueError("Gemini không trả về kết quả ứng viên")
+
+        parts = candidates[0].get("content", {}).get("parts", [])
+        for part in parts:
+            inline_data = part.get("inlineData")
+            if not inline_data:
+                continue
+
+            mime_type = inline_data.get("mimeType", "image/png")
+            image_data = inline_data.get("data")
+            if not image_data:
+                continue
+
+            file_extension = "png" if "png" in mime_type else "jpg"
+            return {
+                "content": base64.b64decode(image_data),
+                "mime_type": mime_type,
+                "file_extension": file_extension,
+                "revised_prompt": None,
+                "provider": "gemini",
+                "model": model,
+            }
+
+        logger.error("Gemini không tìm thấy trong nội dung trả về inlineData dữ liệu hình ảnh")
+        raise ValueError("Gemini không trả về dữ liệu hình ảnh")

@@ -1,0 +1,19 @@
+#root {
+  width: 100%;
+  margin: 0;
+  padding: 0;
+}
+
+/* Tối ưu văn bản nút trên thiết bị di động */
+@media (max-width: 576px) {
+  .button-text-mobile {
+    font-size: 14px;
+  }
+  
+  /* Trên màn hình nhỏ có thể ẩn chữ của nút, chỉ giữ lại biểu tượng */
+  @media (max-width: 480px) {
+    .button-text-mobile {
+      display: none;
+    }
+  }
+}

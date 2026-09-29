@@ -1,0 +1,1189 @@
+import { useState, useEffect } from 'react';
+import {
+  Card,
+  Button,
+  Space,
+  Typography,
+  Modal,
+  Form,
+  Input,
+  Switch,
+  Select,
+  message,
+  Tag,
+  Spin,
+  Empty,
+  Alert,
+  Row,
+  Col,
+  theme,
+} from 'antd';
+import {
+  PlusOutlined,
+  EditOutlined,
+  DeleteOutlined,
+  CheckCircleOutlined,
+  CloseCircleOutlined,
+  ThunderboltOutlined,
+  InfoCircleOutlined,
+  ToolOutlined,
+  ApiOutlined,
+  QuestionCircleOutlined,
+  WarningOutlined,
+} from '@ant-design/icons';
+import { mcpPluginApi, settingsApi } from '../services/api';
+import type { MCPPlugin, MCPTool } from '../types';
+
+const { Paragraph, Text, Title } = Typography;
+const { TextArea } = Input;
+
+export default function MCPPluginsPage() {
+  const [isMobile, setIsMobile] = useState(window.innerWidth <= 768);
+  const [form] = Form.useForm();
+  const { token } = theme.useToken();
+  const alphaColor = (color: string, alpha: number) => `color-mix(in srgb, ${color} ${(alpha * 100).toFixed(0)}%, transparent)`;
+
+  const statusStyles = {
+    success: {
+      bg: token.colorSuccessBg,
+      border: token.colorSuccessBorder,
+      text: token.colorSuccessText,
+    },
+    info: {
+      bg: token.colorInfoBg,
+      border: token.colorInfoBorder,
+      text: token.colorInfoText,
+    },
+    warning: {
+      bg: token.colorWarningBg,
+      border: token.colorWarningBorder,
+      text: token.colorWarningText,
+    },
+    error: {
+      bg: token.colorErrorBg,
+      border: token.colorErrorBorder,
+      text: token.colorErrorText,
+    },
+  };
+
+  // Lắng nghe responsive sự thay đổi kích thước cửa sổ
+  useEffect(() => {
+    const handleResize = () => {
+      setIsMobile(window.innerWidth <= 768);
+    };
+    window.addEventListener('resize', handleResize);
+    return () => window.removeEventListener('resize', handleResize);
+  }, []);
+  const [modal, contextHolder] = Modal.useModal();
+  const [loading, setLoading] = useState(false);
+  const [plugins, setPlugins] = useState<MCPPlugin[]>([]);
+  const [modalVisible, setModalVisible] = useState(false);
+  const [editingPlugin, setEditingPlugin] = useState<MCPPlugin | null>(null);
+  const [testingPluginId, setTestingPluginId] = useState<string | null>(null);
+  const [viewingTools, setViewingTools] = useState<{ pluginId: string; tools: MCPTool[] } | null>(null);
+  const [checkingFunctionCalling, setCheckingFunctionCalling] = useState(false);
+  const [modelSupportStatus, setModelSupportStatus] = useState<'unknown' | 'supported' | 'unsupported'>('unknown');
+
+  useEffect(() => {
+    const initPage = async () => {
+      setLoading(true);
+      try {
+        // 1. Lấy song song danh sách plugin và cài đặt hiện tại
+        const [pluginsData, settings] = await Promise.all([
+          mcpPluginApi.getPlugins(),
+          settingsApi.getSettings()
+        ]);
+        
+        setPlugins(pluginsData);
+
+        // 2. Kiểm tra tính nhất quán cấu hình
+        const verifiedConfigStr = localStorage.getItem('mcp_verified_config');
+        if (verifiedConfigStr) {
+          try {
+            const verifiedConfig = JSON.parse(verifiedConfigStr);
+            const currentConfig = {
+              provider: settings.api_provider,
+              baseUrl: settings.api_base_url,
+              model: settings.llm_model
+            };
+
+            // So sánh xem cấu hình quan trọng có thay đổi không
+            const isConfigChanged =
+              verifiedConfig.provider !== currentConfig.provider ||
+              verifiedConfig.baseUrl !== currentConfig.baseUrl ||
+              verifiedConfig.model !== currentConfig.model;
+
+            if (isConfigChanged) {
+              // Cấu hình đã thay đổi
+              setModelSupportStatus('unknown');
+              
+              // Kiểm tra xem có plugin đang chạy không
+              const activePlugins = pluginsData.filter(p => p.enabled);
+              if (activePlugins.length > 0) {
+                // Tự động vô hiệu hóa mọi plugin
+                message.loading({ content: 'Phát hiện thay đổi cấu hình mô hình, đang tự động vô hiệu hóa plugin vì lý do an toàn...', key: 'auto_disable' });
+                
+                await Promise.all(activePlugins.map(p => mcpPluginApi.togglePlugin(p.id, false)));
+                
+                // Tải lại trạng thái danh sách plugin
+                const updatedPlugins = await mcpPluginApi.getPlugins();
+                setPlugins(updatedPlugins);
+                
+                message.success({ content: 'Đã tự động vô hiệu hóa mọi plugin, vui lòng kiểm tra lại năng lực mô hình', key: 'auto_disable' });
+                
+                modal.warning({
+                  title: 'Nhắc nhở thay đổi cấu hình',
+                  centered: true,
+                  content: 'Phát hiện bạn đã đổi  AI mô hình hoặc địa chỉ API. Để tránh gọi nhầm, hệ thống đã tự động tạm dừng mọi  MCP plugin. Vui lòng thực hiện lại "Kiểm tra năng lực mô hình", xác nhận mô hình mới hỗ trợ  Function Calling  rồi mới bật plugin.',
+                  okText: 'Đã hiểu',
+                });
+              } else {
+                // Không có plugin đang chạy, chỉ gợi ý
+                message.info('Phát hiện cấu hình mô hình đã thay đổi, vui lòng kiểm tra lại năng lực mô hình');
+              }
+              
+              // Xóa trạng thái xác minh cũ
+              localStorage.removeItem('mcp_verified_config');
+            } else {
+              // Cấu hình không thay đổi, khôi phục trạng thái xác minh (khôi phục theo trạng thái đã cache)
+              const cachedStatus = verifiedConfig.status || 'supported';
+              setModelSupportStatus(cachedStatus as 'unknown' | 'supported' | 'unsupported');
+            }
+          } catch (e) {
+            console.error('Failed to parse verified config:', e);
+            localStorage.removeItem('mcp_verified_config');
+          }
+        }
+      } catch (error) {
+        console.error('Init page failed:', error);
+        message.error('Khởi tạo trang thất bại');
+      } finally {
+        setLoading(false);
+      }
+    };
+    initPage();
+  }, [modal]);
+
+  const loadPlugins = async () => {
+    try {
+      const data = await mcpPluginApi.getPlugins();
+      setPlugins(data);
+    } catch (error) {
+      console.error('Load plugins failed:', error);
+      message.error('Tải danh sách plugin thất bại');
+    }
+  };
+
+  const handleCreate = () => {
+    if (modelSupportStatus !== 'supported') {
+      modal.confirm({
+        title: 'Kiểm tra năng lực mô hình',
+        centered: true,
+        icon: <WarningOutlined />,
+        content: 'Để đảm bảo  MCP plugin hoạt động bình thường,  AI mô hình bạn đang dùng phải hỗ trợ  Function Calling (gọi công cụ). Vui lòng kiểm tra hỗ trợ mô hình trước.',
+        okText: 'Đi kiểm tra',
+        cancelText: 'Hủy',
+        onOk: handleCheckFunctionCalling,
+      });
+      return;
+    }
+    setEditingPlugin(null);
+    form.resetFields();
+    form.setFieldsValue({
+      enabled: true,
+      category: 'search',
+      config_json: `{
+  "mcpServers": {
+    "exa": {
+      "type": "http",
+      "url": "https://mcp.exa.ai/mcp?exaApiKey=YOUR_API_KEY",
+      "headers": {}
+    }
+  }
+}`
+    });
+    setModalVisible(true);
+  };
+
+  const handleEdit = (plugin: MCPPlugin) => {
+    setEditingPlugin(plugin);
+
+    // Tái cấu trúc thành MCPđịnh dạng cấu hình
+    const mcpConfig: Record<string, Record<string, Record<string, unknown>>> = {
+      mcpServers: {
+        [plugin.plugin_name]: {
+          type: plugin.plugin_type || 'http'
+        }
+      }
+    };
+
+    if (plugin.plugin_type === 'http' || plugin.plugin_type === 'streamable_http' || plugin.plugin_type === 'sse') {
+      mcpConfig.mcpServers[plugin.plugin_name].url = plugin.server_url;
+      mcpConfig.mcpServers[plugin.plugin_name].headers = plugin.headers || {};
+    } else {
+      mcpConfig.mcpServers[plugin.plugin_name].command = plugin.command;
+      mcpConfig.mcpServers[plugin.plugin_name].args = plugin.args || [];
+      mcpConfig.mcpServers[plugin.plugin_name].env = plugin.env || {};
+    }
+
+    form.setFieldsValue({
+      config_json: JSON.stringify(mcpConfig, null, 2),
+      enabled: plugin.enabled,
+      category: plugin.category || 'general',
+    });
+    setModalVisible(true);
+  };
+
+  const handleDelete = (plugin: MCPPlugin) => {
+    modal.confirm({
+      title: 'Xóa plugin',
+      content: `Bạn có chắc muốn xóa plugin  "${plugin.display_name || plugin.plugin_name}"  không?`,
+      centered: true,
+      okText: 'Xác nhận',
+      cancelText: 'Hủy',
+      okType: 'danger',
+      onOk: async () => {
+        try {
+          await mcpPluginApi.deletePlugin(plugin.id);
+          message.success('Đã xóa plugin');
+          loadPlugins();
+        } catch (error) {
+          console.error('Delete plugin failed:', error);
+          message.error('Xóa plugin thất bại');
+        }
+      },
+    });
+  };
+
+  const handleToggle = async (plugin: MCPPlugin, enabled: boolean) => {
+    try {
+      await mcpPluginApi.togglePlugin(plugin.id, enabled);
+      message.success(enabled ? 'Plugin đã được bật' : 'Plugin đã bị vô hiệu hóa');
+      loadPlugins();
+    } catch (error) {
+      console.error('Toggle plugin failed:', error);
+      message.error('Chuyển đổi trạng thái plugin thất bại');
+    }
+  };
+
+  const handleTest = async (pluginId: string) => {
+    setTestingPluginId(pluginId);
+    try {
+      const result = await mcpPluginApi.testPlugin(pluginId);
+
+      // Sau khi kiểm tra xong, dù thành công hay thất bại đều refresh danh sách plugin để cập nhật trạng thái
+      await loadPlugins();
+
+      if (result.success) {
+        const suggestions = result.suggestions || [];
+        const aiChoice = suggestions.find((s: string) => s.startsWith('🤖'))?.replace('🤖 AIchọn: ', '') || '';
+        const paramsStr = suggestions.find((s: string) => s.startsWith('📝'))?.replace('📝 tham số: ', '') || '';
+        const callTime = suggestions.find((s: string) => s.startsWith('⏱️'))?.replace('⏱️ Thời gian tốn: ', '') || '';
+        const resultStr = suggestions.find((s: string) => s.startsWith('📊'))?.replace('📊 kết quả:\n', '') || '';
+
+        modal.success({
+          title: '🎉 Kiểm tra thành công',
+          centered: true,
+          width: isMobile ? '95%' : 700,
+          content: (
+            <div style={{ padding: '8px 0' }}>
+              <div style={{ marginBottom: 16, padding: 12, background: statusStyles.success.bg, border: `1px solid ${statusStyles.success.border}`, borderRadius: 8 }}>
+                <Typography.Text strong style={{ color: statusStyles.success.text, fontSize: 14 }}>
+                  ✓ {result.message}
+                </Typography.Text>
+              </div>
+
+              <div style={{ display: 'grid', gridTemplateColumns: isMobile ? '1fr' : '1fr 1fr', gap: 12, marginBottom: 16 }}>
+                <div style={{ padding: 12, background: token.colorBgLayout, borderRadius: 8 }}>
+                  <Text type="secondary" style={{ fontSize: 12 }}>Số công cụ khả dụng</Text>
+                  <div><Text strong style={{ fontSize: 20 }}>{result.tools_count || 0}</Text></div>
+                </div>
+                <div style={{ padding: 12, background: token.colorBgLayout, borderRadius: 8 }}>
+                  <Text type="secondary" style={{ fontSize: 12 }}>Tổng thời gian phản hồi</Text>
+                  <div><Text strong style={{ fontSize: 20 }}>{result.response_time_ms?.toFixed(0) || 0}ms</Text></div>
+                </div>
+              </div>
+
+              {aiChoice && (
+                <div style={{ marginBottom: 12, padding: 12, background: statusStyles.info.bg, borderRadius: 8, border: `1px solid ${statusStyles.info.border}` }}>
+                  <Text type="secondary" style={{ fontSize: 12, display: 'block', marginBottom: 4 }}>🤖 Công cụ AI đã chọn</Text>
+                  <Text code strong>{aiChoice}</Text>
+                  {callTime && <Tag color="blue" style={{ marginLeft: 8 }}>{callTime}</Tag>}
+                </div>
+              )}
+
+              {paramsStr && (
+                <div style={{ marginBottom: 12 }}>
+                  <Text type="secondary" style={{ fontSize: 12, display: 'block', marginBottom: 4 }}>📝 Tham số gọi</Text>
+                  <pre style={{ margin: 0, padding: 8, background: token.colorBgLayout, borderRadius: 4, fontSize: 12, overflow: 'auto', maxHeight: 100 }}>
+                    {(() => { try { return JSON.stringify(JSON.parse(paramsStr), null, 2); } catch { return paramsStr; } })()}
+                  </pre>
+                </div>
+              )}
+
+              {resultStr && (
+                <div style={{ marginBottom: 12 }}>
+                  <Text type="secondary" style={{ fontSize: 12, display: 'block', marginBottom: 4 }}>📊 Xem trước kết quả trả về</Text>
+                  <pre style={{ margin: 0, padding: 8, background: token.colorBgLayout, borderRadius: 4, fontSize: 11, overflow: 'auto', maxHeight: 150, whiteSpace: 'pre-wrap', wordBreak: 'break-word' }}>
+                    {resultStr}
+                  </pre>
+                </div>
+              )}
+
+              <Alert message='Trạng thái plugin đã tự động cập nhật thành "Đang chạy"' type="success" showIcon />
+            </div>
+          ),
+        });
+      } else {
+        modal.error({
+          title: 'Kiểm tra thất bại',
+          centered: true,
+          width: isMobile ? '90%' : 600,
+          content: (
+            <div style={{ padding: '8px 0' }}>
+              <div style={{ marginBottom: 16 }}>
+                <Alert
+                  message={result.message || 'MCPKiểm tra plugin thất bại'}
+                  type="error"
+                  showIcon
+                />
+              </div>
+
+              {result.error && (
+                <div style={{
+                  padding: 16,
+                  background: statusStyles.error.bg,
+                  border: `1px solid ${statusStyles.error.border}`,
+                  borderRadius: 8,
+                  marginBottom: 16
+                }}>
+                  <Text strong style={{ fontSize: 14, display: 'block', marginBottom: 8 }}>Thông tin lỗi:</Text>
+                  <Text style={{ fontSize: 13, color: statusStyles.error.text, fontFamily: 'monospace', whiteSpace: 'pre-wrap', wordBreak: 'break-word' }}>
+                    {result.error}
+                  </Text>
+                </div>
+              )}
+
+              {result.suggestions && result.suggestions.length > 0 && (
+                <div style={{
+                  padding: 16,
+                  background: statusStyles.warning.bg,
+                  border: `1px solid ${statusStyles.warning.border}`,
+                  borderRadius: 8,
+                  marginBottom: 16
+                }}>
+                  <Text strong style={{ fontSize: 14, display: 'block', marginBottom: 8 }}>💡 Gợi ý:</Text>
+                  <ul style={{ margin: 0, paddingLeft: 20, fontSize: 13 }}>
+                    {result.suggestions.map((s: string, i: number) => (
+                      <li key={i} style={{ marginBottom: 4 }}>{s}</li>
+                    ))}
+                  </ul>
+                </div>
+              )}
+
+              <Alert
+                message="Trạng thái plugin đã cập nhật, vui lòng kiểm tra cấu hình rồi thử lại"
+                type="warning"
+                showIcon
+              />
+            </div>
+          ),
+        });
+      }
+    } catch {
+      message.error('Kiểm tra plugin thất bại');
+    } finally {
+      setTestingPluginId(null);
+    }
+  };
+
+  const handleViewTools = async (pluginId: string) => {
+    try {
+      const result = await mcpPluginApi.getPluginTools(pluginId);
+      setViewingTools({ pluginId, tools: result.tools });
+    } catch (error) {
+      console.error('Get tools failed:', error);
+      message.error('Lấy danh sách công cụ thất bại');
+    }
+  };
+
+  const handleCheckFunctionCalling = async () => {
+    // Lấy cấu hình hiện tại từ cài đặt
+    setCheckingFunctionCalling(true);
+    try {
+      const settings = await settingsApi.getSettings();
+      
+      if (!settings.llm_model) {
+        message.warning('Vui lòng cấu hình mô hình trong trang cài đặt trước');
+        return;
+      }
+
+      const result = await settingsApi.checkFunctionCalling({
+        api_key: settings.api_key,
+        api_base_url: settings.api_base_url || '',
+        provider: settings.api_provider || 'openai',
+        llm_model: settings.llm_model,
+      });
+
+      // Dù thành công hay thất bại, đều cache cấu hình và trạng thái của lần kiểm tra hiện tại
+      const configToCache = {
+        provider: settings.api_provider,
+        baseUrl: settings.api_base_url,
+        model: settings.llm_model,
+        status: result.success && result.supported ? 'supported' : 'unsupported',
+        testedAt: new Date().toISOString()
+      };
+      localStorage.setItem('mcp_verified_config', JSON.stringify(configToCache));
+
+      if (result.success && result.supported) {
+        setModelSupportStatus('supported');
+
+        modal.success({
+          title: '✅ Kiểm tra hỗ trợ Function Calling',
+          centered: true,
+          width: isMobile ? '95%' : 700,
+          content: (
+            <div style={{ padding: '8px 0' }}>
+              <div style={{ marginBottom: 16, padding: 12, background: statusStyles.success.bg, border: `1px solid ${statusStyles.success.border}`, borderRadius: 8 }}>
+                <Typography.Text strong style={{ color: statusStyles.success.text, fontSize: 14 }}>
+                  ✓ {result.message}
+                </Typography.Text>
+              </div>
+
+              <div style={{ display: 'grid', gridTemplateColumns: isMobile ? '1fr' : '1fr 1fr', gap: 12, marginBottom: 16 }}>
+                <div style={{ padding: 12, background: token.colorBgLayout, borderRadius: 8 }}>
+                  <Text type="secondary" style={{ fontSize: 12 }}>API Nhà cung cấp</Text>
+                  <div><Text strong style={{ fontSize: 16 }}>{result.provider}</Text></div>
+                </div>
+                <div style={{ padding: 12, background: token.colorBgLayout, borderRadius: 8 }}>
+                  <Text type="secondary" style={{ fontSize: 12 }}>Thời gian phản hồi</Text>
+                  <div><Text strong style={{ fontSize: 16 }}>{result.response_time_ms?.toFixed(0) || 0}ms</Text></div>
+                </div>
+              </div>
+
+              <div style={{ marginBottom: 12, padding: 12, background: statusStyles.info.bg, borderRadius: 8, border: `1px solid ${statusStyles.info.border}` }}>
+                <Text type="secondary" style={{ fontSize: 12, display: 'block', marginBottom: 4 }}>🔧 Thông tin mô hình</Text>
+                <Text code strong>{result.model}</Text>
+                {result.details?.finish_reason && (
+                  <Tag color="green" style={{ marginLeft: 8 }}>finish_reason: {result.details.finish_reason}</Tag>
+                )}
+              </div>
+
+              {result.details && (
+                <div style={{ marginBottom: 12 }}>
+                  <Text type="secondary" style={{ fontSize: 12, display: 'block', marginBottom: 4 }}>📊 Chi tiết kiểm tra</Text>
+                  <div style={{ padding: 8, background: token.colorBgLayout, borderRadius: 4, fontSize: 12 }}>
+                    <div>✓ Số lần gọi công cụ: {result.details.tool_call_count || 0}</div>
+                    <div>✓ Công cụ kiểm tra: {result.details.test_tool || 'N/A'}</div>
+                    <div>✓ Loại phản hồi: {result.details.response_type || 'N/A'}</div>
+                  </div>
+                </div>
+              )}
+
+              {result.tool_calls && result.tool_calls.length > 0 && (
+                <div style={{ marginBottom: 12 }}>
+                  <Text type="secondary" style={{ fontSize: 12, display: 'block', marginBottom: 4 }}>🔨 Ví dụ gọi công cụ</Text>
+                  <pre style={{ margin: 0, padding: 8, background: token.colorBgLayout, borderRadius: 4, fontSize: 11, overflow: 'auto', maxHeight: 150 }}>
+                    {JSON.stringify(result.tool_calls[0], null, 2)}
+                  </pre>
+                </div>
+              )}
+
+              {result.suggestions && result.suggestions.length > 0 && (
+                <div style={{ padding: 12, background: statusStyles.success.bg, border: `1px solid ${statusStyles.success.border}`, borderRadius: 8 }}>
+                  <Text strong style={{ fontSize: 13, display: 'block', marginBottom: 8 }}>💡 Gợi ý</Text>
+                  <ul style={{ margin: 0, paddingLeft: 20, fontSize: 12 }}>
+                    {result.suggestions.map((s: string, i: number) => (
+                      <li key={i} style={{ marginBottom: 4 }}>{s}</li>
+                    ))}
+                  </ul>
+                </div>
+              )}
+            </div>
+          ),
+        });
+      } else {
+        setModelSupportStatus('unsupported');
+        modal.warning({
+          title: '❌ Kiểm tra hỗ trợ Function Calling',
+          centered: true,
+          width: isMobile ? '95%' : 700,
+          content: (
+            <div style={{ padding: '8px 0' }}>
+              <div style={{ marginBottom: 16 }}>
+                <Alert
+                  message={result.message || 'Mô hình không hỗ trợ  Function Calling'}
+                  type="warning"
+                  showIcon
+                />
+              </div>
+
+              {result.error && (
+                <div style={{
+                  padding: 16,
+                  background: statusStyles.warning.bg,
+                  border: `1px solid ${statusStyles.warning.border}`,
+                  borderRadius: 8,
+                  marginBottom: 16
+                }}>
+                  <Text strong style={{ fontSize: 14, display: 'block', marginBottom: 8 }}>Thông tin lỗi:</Text>
+                  <Text style={{ fontSize: 13, fontFamily: 'monospace' }}>
+                    {result.error}
+                  </Text>
+                </div>
+              )}
+
+              {result.response_preview && (
+                <div style={{ marginBottom: 12 }}>
+                  <Text type="secondary" style={{ fontSize: 12, display: 'block', marginBottom: 4 }}>📝 Nội dung mô hình trả về (200 ký tự đầu)</Text>
+                  <pre style={{ margin: 0, padding: 8, background: token.colorBgLayout, borderRadius: 4, fontSize: 11, overflow: 'auto', maxHeight: 100, whiteSpace: 'pre-wrap' }}>
+                    {result.response_preview}
+                  </pre>
+                </div>
+              )}
+
+              {result.suggestions && result.suggestions.length > 0 && (
+                <div style={{
+                  padding: 16,
+                  background: statusStyles.info.bg,
+                  border: `1px solid ${statusStyles.info.border}`,
+                  borderRadius: 8
+                }}>
+                  <Text strong style={{ fontSize: 14, display: 'block', marginBottom: 8 }}>💡 Gợi ý:</Text>
+                  <ul style={{ margin: 0, paddingLeft: 20, fontSize: 13 }}>
+                    {result.suggestions.map((s: string, i: number) => (
+                      <li key={i} style={{ marginBottom: 4 }}>{s}</li>
+                    ))}
+                  </ul>
+                </div>
+              )}
+            </div>
+          ),
+        });
+      }
+    } catch (error) {
+      console.error('Check function calling failed:', error);
+      message.error('Kiểm tra thất bại, vui lòng thử lại sau');
+      setModelSupportStatus('unsupported');
+    } finally {
+      setCheckingFunctionCalling(false);
+    }
+  };
+
+  const handleSubmit = async (values: { config_json: string; enabled: boolean; category?: string }) => {
+    setLoading(true);
+    try {
+      // Kiểm tra JSONđịnh dạng
+      try {
+        JSON.parse(values.config_json);
+      } catch {
+        message.error('Cấu hình JSONlỗi định dạng, vui lòng kiểm tra');
+        setLoading(false);
+        return;
+      }
+
+      const data = {
+        config_json: values.config_json,
+        enabled: values.enabled,
+        category: values.category || 'general',
+      };
+
+      // Thống nhất dùng API, backend sẽ tự xác định là tạo mới hay cập nhật
+      await mcpPluginApi.createPluginSimple(data);
+      message.success(editingPlugin ? 'Plugin đã được cập nhật' : 'Plugin đã được tạo');
+
+      setModalVisible(false);
+      form.resetFields();
+      loadPlugins();
+    } catch (error: unknown) {
+      const err = error as { response?: { data?: { detail?: string } } };
+      const errorMsg = err?.response?.data?.detail || 'Thao tác thất bại';
+      message.error(errorMsg);
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const getStatusTag = (plugin: MCPPlugin) => {
+    if (!plugin.enabled) {
+      return <Tag color="default">Đã vô hiệu hóa</Tag>;
+    }
+    switch (plugin.status) {
+      case 'active':
+        return <Tag color="success" icon={<CheckCircleOutlined />}>Đang chạy</Tag>;
+      case 'error':
+        return (
+          <Tag color="error" icon={<CloseCircleOutlined />} title={plugin.last_error}>Lỗi</Tag>
+        );
+      default:
+        return <Tag color="default">Chưa kích hoạt</Tag>;
+    }
+  };
+
+  return (
+    <>
+      {contextHolder}
+      <div style={{
+        minHeight: '90vh',
+        background: `linear-gradient(180deg, ${token.colorBgLayout} 0%, ${alphaColor(token.colorPrimary, 0.08)} 100%)`,
+        padding: isMobile ? '20px 16px 70px' : '24px 24px 70px',
+        display: 'flex',
+        flexDirection: 'column',
+      }}>
+        <div style={{
+          maxWidth: 1400,
+          margin: '0 auto',
+          width: '100%',
+          flex: 1,
+          display: 'flex',
+          flexDirection: 'column',
+        }}>
+          {/* Thẻ điều hướng trên cùng */}
+          <Card
+            variant="borderless"
+            style={{
+              background: `linear-gradient(135deg, ${token.colorPrimary} 0%, ${alphaColor(token.colorPrimary, 0.8)} 50%, ${token.colorPrimaryHover} 100%)`,
+              borderRadius: isMobile ? 16 : 24,
+              boxShadow: `0 12px 40px ${alphaColor(token.colorPrimary, 0.25)}, 0 4px 12px ${alphaColor(token.colorText, 0.08)}`,
+              marginBottom: isMobile ? 20 : 24,
+              border: 'none',
+              position: 'relative',
+              overflow: 'hidden'
+            }}
+          >
+            {/* Phần tử nền trang trí */}
+            <div style={{ position: 'absolute', top: -60, right: -60, width: 200, height: 200, borderRadius: '50%', background: alphaColor(token.colorWhite, 0.08), pointerEvents: 'none' }} />
+            <div style={{ position: 'absolute', bottom: -40, left: '30%', width: 120, height: 120, borderRadius: '50%', background: alphaColor(token.colorWhite, 0.05), pointerEvents: 'none' }} />
+            <div style={{ position: 'absolute', top: '50%', right: '15%', width: 80, height: 80, borderRadius: '50%', background: alphaColor(token.colorWhite, 0.06), pointerEvents: 'none' }} />
+
+            <Row align="middle" justify="space-between" gutter={[16, 16]} style={{ position: 'relative', zIndex: 1 }}>
+              <Col xs={24} sm={12}>
+                <Space direction="vertical" size={4}>
+                  <Space align="center">
+                    <Title level={isMobile ? 3 : 2} style={{ margin: 0, color: token.colorWhite, textShadow: `0 2px 4px ${alphaColor(token.colorText, 0.2)}` }}>
+                      <ToolOutlined style={{ color: alphaColor(token.colorWhite, 0.9), marginRight: 8 }} />
+                      MCPQuản lý plugin
+                    </Title>
+                  </Space>
+                  <Text style={{ fontSize: isMobile ? 12 : 14, color: alphaColor(token.colorWhite, 0.85), marginLeft: isMobile ? 40 : 48 }}>
+                    Mở rộng AInăng lực AI, kết nối công cụ và dịch vụ bên ngoài
+                  </Text>
+                </Space>
+              </Col>
+              <Col xs={24} sm={12}>
+                <Space size={12} style={{ display: 'flex', justifyContent: isMobile ? 'flex-start' : 'flex-end', width: '100%' }}>
+                  <Button
+                    type="primary"
+                    icon={<PlusOutlined />}
+                    onClick={handleCreate}
+                    style={{
+                      borderRadius: 12,
+                      background: alphaColor(token.colorWarning, 0.95),
+                      border: `1px solid ${alphaColor(token.colorWhite, 0.3)}`,
+                      boxShadow: `0 4px 16px ${alphaColor(token.colorWarning, 0.4)}`,
+                      color: token.colorWhite,
+                      fontWeight: 600
+                    }}
+                  >
+                    Thêm plugin
+                  </Button>
+                </Space>
+              </Col>
+            </Row>
+
+            <div style={{ marginTop: isMobile ? 16 : 24, display: 'flex', gap: isMobile ? 12 : 16, flexDirection: isMobile ? 'column' : 'row' }}>
+              <Card
+                variant="borderless"
+                style={{
+                  flex: 1,
+                  borderRadius: 12,
+                  background: alphaColor(token.colorBgContainer, 0.9),
+                  border: `1px solid ${alphaColor(token.colorBorder, 0.6)}`,
+                  backdropFilter: 'blur(10px)',
+                  boxShadow: `0 4px 12px ${alphaColor(token.colorText, 0.06)}`
+                }}
+                styles={{ body: { padding: isMobile ? 14 : 20 } }}
+              >
+                <div style={{
+                  display: 'flex',
+                  flexDirection: isMobile ? 'column' : 'row',
+                  justifyContent: 'space-between',
+                  alignItems: isMobile ? 'stretch' : 'center',
+                  gap: isMobile ? 12 : 0
+                }}>
+                  <Space align="start" style={{ flex: 1 }}>
+                    <div style={{
+                      width: isMobile ? 36 : 40,
+                      height: isMobile ? 36 : 40,
+                      borderRadius: '50%',
+                      background: modelSupportStatus === 'supported' ? statusStyles.success.bg : modelSupportStatus === 'unsupported' ? statusStyles.error.bg : statusStyles.info.bg,
+                      display: 'flex', alignItems: 'center', justifyContent: 'center',
+                      border: `1px solid ${modelSupportStatus === 'supported' ? statusStyles.success.border : modelSupportStatus === 'unsupported' ? statusStyles.error.border : statusStyles.info.border}`,
+                      flexShrink: 0
+                    }}>
+                      {modelSupportStatus === 'supported' ? (
+                        <CheckCircleOutlined style={{ fontSize: isMobile ? 18 : 20, color: statusStyles.success.text }} />
+                      ) : modelSupportStatus === 'unsupported' ? (
+                        <CloseCircleOutlined style={{ fontSize: isMobile ? 18 : 20, color: statusStyles.error.text }} />
+                      ) : (
+                        <QuestionCircleOutlined style={{ fontSize: isMobile ? 18 : 20, color: statusStyles.info.text }} />
+                      )}
+                    </div>
+                    <div style={{ flex: 1, minWidth: 0 }}>
+                      <Text strong style={{ fontSize: isMobile ? 14 : 16, display: 'block', color: token.colorText }}>Kiểm tra năng lực mô hình</Text>
+                      <Text type="secondary" style={{ fontSize: isMobile ? 12 : 13, display: 'block', lineHeight: 1.5 }}>
+                        {modelSupportStatus === 'supported'
+                          ? 'Mô hình hiện tại hỗ trợ  Function Calling, có thể dùng bình thường  MCP plugin'
+                          : modelSupportStatus === 'unsupported'
+                            ? 'Mô hình hiện tại không hỗ trợ  Function Calling, không thể dùng  MCP plugin'
+                            : 'Vui lòng kiểm tra trước xem mô hình có hỗ trợ  Function Calling năng lực'}
+                      </Text>
+                    </div>
+                  </Space>
+                  <Button
+                    type={modelSupportStatus === 'supported' ? 'default' : 'primary'}
+                    icon={<ApiOutlined />}
+                    onClick={handleCheckFunctionCalling}
+                    loading={checkingFunctionCalling}
+                    style={{ borderRadius: 8, width: isMobile ? '100%' : 'auto' }}
+                    size={isMobile ? 'middle' : 'middle'}
+                  >
+                    {modelSupportStatus === 'unknown' ? 'Bắt đầu kiểm tra' : 'Kiểm tra lại'}
+                  </Button>
+                </div>
+              </Card>
+
+              <Card
+                variant="borderless"
+                style={{
+                  flex: 1,
+                  borderRadius: 12,
+                  background: alphaColor(token.colorInfoBg, 0.7),
+                  border: `1px solid ${alphaColor(token.colorInfoBorder, 0.8)}`,
+                  backdropFilter: 'blur(10px)',
+                  boxShadow: `0 4px 12px ${alphaColor(token.colorText, 0.06)}`
+                }}
+                styles={{ body: { padding: isMobile ? 14 : 20 } }}
+              >
+                <Space align="start">
+                  <InfoCircleOutlined style={{ fontSize: isMobile ? 18 : 20, color: token.colorPrimary, marginTop: 2, flexShrink: 0 }} />
+                  <div style={{ flex: 1, minWidth: 0 }}>
+                    <Text strong style={{ fontSize: isMobile ? 14 : 16, display: 'block', color: token.colorText, marginBottom: 4 }}> MCP Plugin MCP là gì?</Text>
+                    <Text style={{ fontSize: isMobile ? 12 : 13, display: 'block', color: token.colorTextSecondary, lineHeight: 1.6 }}>
+                      MCP (Model Context Protocol) Giao thức cho phép  AI AI gọi công cụ bên ngoài để lấy dữ liệu. Bằng cách thêm plugin, AI AI có thể truy cập công cụ tìm kiếm, cơ sở dữ liệu, API API và các dịch vụ khác, nâng cao đáng kể năng lực sáng tác.
+                    </Text>
+                  </div>
+                </Space>
+              </Card>
+            </div>
+          </Card>
+
+          {/* Khu vực nội dung chính */}
+          <div style={{ flex: 1 }}>
+            {/* Cảnh báo khi năng lực mô hình chưa được xác minh */}
+            {modelSupportStatus !== 'supported' && plugins.length > 0 && (
+              <Alert
+                message={
+                  modelSupportStatus === 'unsupported'
+                    ? 'Mô hình hiện tại không hỗ trợ  Function Calling, mọi thao tác plugin đã bị vô hiệu hóa'
+                    : 'Vui lòng hoàn thành kiểm tra năng lực mô hình trước khi thao tác plugin'
+                }
+                type={modelSupportStatus === 'unsupported' ? 'error' : 'warning'}
+                showIcon
+                icon={modelSupportStatus === 'unsupported' ? <CloseCircleOutlined /> : <WarningOutlined />}
+                style={{ marginBottom: 16, borderRadius: 8 }}
+                action={
+                  <Button size="small" type="primary" onClick={handleCheckFunctionCalling} loading={checkingFunctionCalling}>
+                    {modelSupportStatus === 'unknown' ? 'Bắt đầu kiểm tra' : 'Kiểm tra lại'}
+                  </Button>
+                }
+              />
+            )}
+
+            {/* Danh sách plugin */}
+            <Spin spinning={loading}>
+              {plugins.length === 0 ? (
+                <Empty
+                  description="Chưa thêm plugin nào"
+                  image={Empty.PRESENTED_IMAGE_SIMPLE}
+                  style={{ padding: isMobile ? '40px 0' : '60px 0' }}
+                >
+                  <Button type="primary" icon={<PlusOutlined />} onClick={handleCreate}>
+                    Thêm plugin đầu tiên
+                  </Button>
+                </Empty>
+              ) : (
+                <Space direction="vertical" size={isMobile ? 'small' : 'middle'} style={{ width: '100%' }}>
+                  {plugins.map((plugin) => (
+                    <Card
+                      key={plugin.id}
+                      size="small"
+                      style={{
+                        borderRadius: 8,
+                        border: `1px solid ${token.colorBorderSecondary}`,
+                      }}
+                      styles={{ body: { padding: isMobile ? 12 : 16 } }}
+                    >
+                      <div
+                        style={{
+                          display: 'flex',
+                          flexDirection: 'column',
+                          gap: isMobile ? 12 : 16,
+                        }}
+                      >
+                        {/* Khu vực thông tin plugin */}
+                        <div style={{ flex: 1, minWidth: 0 }}>
+                          <Space direction="vertical" size="small" style={{ width: '100%' }}>
+                            {/* Tiêu đề và tag trạng thái */}
+                            <div style={{
+                              display: 'flex',
+                              alignItems: 'center',
+                              gap: '6px',
+                              flexWrap: 'wrap',
+                              justifyContent: 'space-between'
+                            }}>
+                              <div style={{ display: 'flex', alignItems: 'center', gap: '6px', flexWrap: 'wrap', flex: 1 }}>
+                                <Text strong style={{ fontSize: isMobile ? '14px' : '16px' }}>
+                                  {plugin.display_name || plugin.plugin_name}
+                                </Text>
+                                {getStatusTag(plugin)}
+                              </div>
+                              {/* Di động: đặt công tắc ở phía phải hàng tiêu đề */}
+                              {isMobile && (
+                                <Switch
+                                  title={modelSupportStatus !== 'supported' ? 'Vui lòng hoàn thành kiểm tra năng lực mô hình trước' : (plugin.enabled ? 'Vô hiệu hóa plugin' : 'Kích hoạt plugin')}
+                                  checked={plugin.enabled}
+                                  onChange={(checked) => handleToggle(plugin, checked)}
+                                  disabled={modelSupportStatus !== 'supported'}
+                                  size="small"
+                                  checkedChildren="Bật"
+                                  unCheckedChildren="Tắt"
+                                  style={{
+                                    flexShrink: 0,
+                                    height: 16,
+                                    minHeight: 16,
+                                    lineHeight: '16px'
+                                  }}
+                                />
+                              )}
+                            </div>
+                            
+                            {/* Tag loại và phân loại */}
+                            <div style={{ display: 'flex', gap: '4px', flexWrap: 'wrap' }}>
+                              <Tag color={plugin.plugin_type === 'http' || plugin.plugin_type === 'streamable_http' || plugin.plugin_type === 'sse' ? 'blue' : 'cyan'} style={{ fontSize: isMobile ? 11 : 12 }}>
+                                {plugin.plugin_type?.toUpperCase() || 'UNKNOWN'}
+                              </Tag>
+                              {plugin.category && plugin.category !== 'general' && (
+                                <Tag color="purple" style={{ fontSize: isMobile ? 11 : 12 }}>{plugin.category}</Tag>
+                              )}
+                            </div>
+                            
+                            {plugin.description && (
+                              <Paragraph
+                                type="secondary"
+                                style={{
+                                  margin: 0,
+                                  fontSize: isMobile ? '12px' : '13px',
+                                }}
+                                ellipsis={{ rows: 2 }}
+                              >
+                                {plugin.description}
+                              </Paragraph>
+                            )}
+
+                            {/* Chỉ hiển thị URLURL hoặc lệnh có giá trị, ẩn thông tin nhạy cảm */}
+                            {(plugin.plugin_type === 'http' || plugin.plugin_type === 'streamable_http' || plugin.plugin_type === 'sse') && plugin.server_url && (
+                              <div style={{
+                                fontSize: isMobile ? '11px' : '12px',
+                                overflow: 'hidden',
+                                textOverflow: 'ellipsis',
+                                whiteSpace: 'nowrap'
+                              }}>
+                                <Text type="secondary" code style={{ fontSize: 'inherit' }}>
+                                  {(() => {
+                                    // Xử lý ẩn nhạy cảm: ẩn URL trong API Key
+                                    const url = plugin.server_url;
+                                    try {
+                                      const urlObj = new URL(url);
+                                      // Thay thế thông tin nhạy cảm trong tham số truy vấn
+                                      const params = new URLSearchParams(urlObj.search);
+                                      let maskedUrl = `${urlObj.protocol}//${urlObj.host}${urlObj.pathname}`;
+
+                                      const sensitiveKeys = ['apiKey', 'api_key', 'key', 'token', 'secret', 'password', 'auth'];
+                                      let hasParams = false;
+
+                                      params.forEach((value, key) => {
+                                        const isSensitive = sensitiveKeys.some(k => key.toLowerCase().includes(k.toLowerCase()));
+                                        const maskedValue = isSensitive ? '***' : value;
+                                        maskedUrl += (hasParams ? '&' : '?') + `${key}=${maskedValue}`;
+                                        hasParams = true;
+                                      });
+
+                                      return maskedUrl;
+                                    } catch {
+                                      // Nếu URLphân tích thất bại, thử thay thế đơn giản
+                                      return url.replace(/([?&])(apiKey|api_key|key|token|secret|password|auth)=([^&]+)/gi, '$1$2=***');
+                                    }
+                                  })()}
+                                </Text>
+                              </div>
+                            )}
+
+                            {plugin.plugin_type === 'stdio' && plugin.command && (
+                              <div style={{
+                                fontSize: isMobile ? '11px' : '12px',
+                                overflow: 'hidden',
+                                textOverflow: 'ellipsis',
+                                whiteSpace: 'nowrap'
+                              }}>
+                                <Text type="secondary" code style={{ fontSize: 'inherit' }}>
+                                  {plugin.command} {plugin.args?.join(' ')}
+                                </Text>
+                              </div>
+                            )}
+
+                            {/* Hiển thị thông tin lỗi cuối cùng */}
+                            {plugin.last_error && (
+                              <Text type="danger" style={{ fontSize: isMobile ? '11px' : '12px' }}>
+                                Lỗi: {plugin.last_error}
+                              </Text>
+                            )}
+                          </Space>
+                        </div>
+
+                        {/* Khu vực nút thao tác */}
+                        <div style={{
+                          display: 'flex',
+                          justifyContent: isMobile ? 'flex-end' : 'flex-start',
+                          alignItems: 'center',
+                          gap: isMobile ? 8 : 8,
+                          flexWrap: 'wrap',
+                          borderTop: isMobile ? `1px solid ${token.colorBorderSecondary}` : 'none',
+                          paddingTop: isMobile ? 12 : 0
+                        }}>
+                          {/* Hiển thị công tắc trên desktop */}
+                          {!isMobile && (
+                            <Switch
+                              title={modelSupportStatus !== 'supported' ? 'Vui lòng hoàn thành kiểm tra năng lực mô hình trước' : (plugin.enabled ? 'Vô hiệu hóa plugin' : 'Kích hoạt plugin')}
+                              checked={plugin.enabled}
+                              onChange={(checked) => handleToggle(plugin, checked)}
+                              disabled={modelSupportStatus !== 'supported'}
+                              checkedChildren="Bật"
+                              unCheckedChildren="Tắt"
+                            />
+                          )}
+                          <Button
+                            title={modelSupportStatus !== 'supported' ? 'Vui lòng hoàn thành kiểm tra năng lực mô hình trước' : 'Kiểm tra kết nối'}
+                            icon={<ThunderboltOutlined />}
+                            onClick={() => handleTest(plugin.id)}
+                            loading={testingPluginId === plugin.id}
+                            disabled={modelSupportStatus !== 'supported'}
+                            size={isMobile ? 'small' : 'middle'}
+                          >
+                            {!isMobile && 'Kiểm tra'}
+                          </Button>
+                          <Button
+                            title={modelSupportStatus !== 'supported' ? 'Vui lòng hoàn thành kiểm tra năng lực mô hình trước' : 'Xem công cụ'}
+                            icon={<ToolOutlined />}
+                            onClick={() => handleViewTools(plugin.id)}
+                            disabled={modelSupportStatus !== 'supported' || !plugin.enabled || plugin.status !== 'active'}
+                            size={isMobile ? 'small' : 'middle'}
+                          >
+                            {!isMobile && 'Công cụ'}
+                          </Button>
+                          <Button
+                            title={modelSupportStatus !== 'supported' ? 'Vui lòng hoàn thành kiểm tra năng lực mô hình trước' : 'Chỉnh sửa'}
+                            icon={<EditOutlined />}
+                            onClick={() => handleEdit(plugin)}
+                            disabled={modelSupportStatus !== 'supported'}
+                            size={isMobile ? 'small' : 'middle'}
+                          >
+                            {!isMobile && 'Chỉnh sửa'}
+                          </Button>
+                          <Button
+                            title={modelSupportStatus !== 'supported' ? 'Vui lòng hoàn thành kiểm tra năng lực mô hình trước' : 'Xóa'}
+                            danger
+                            icon={<DeleteOutlined />}
+                            onClick={() => handleDelete(plugin)}
+                            disabled={modelSupportStatus !== 'supported'}
+                            size={isMobile ? 'small' : 'middle'}
+                          >
+                            {!isMobile && 'Xóa'}
+                          </Button>
+                        </div>
+                      </div>
+                    </Card>
+                  ))}
+                </Space>
+              )}
+            </Spin>
+          </div>
+        </div>
+
+        {/* Modal tạo/chỉnh sửa plugin */}
+        <Modal
+          title={editingPlugin ? 'Chỉnh sửa plugin' : 'Thêm plugin'}
+          open={modalVisible}
+          centered
+          onCancel={() => {
+            setModalVisible(false);
+            form.resetFields();
+          }}
+          onOk={() => form.submit()}
+          width={isMobile ? '100%' : 600}
+          confirmLoading={loading}
+          okText="Lưu"
+          cancelText="Hủy"
+        >
+          <Form form={form} layout="vertical" onFinish={handleSubmit}>
+            <Form.Item
+              label="MCPCấu hình JSON"
+              name="config_json"
+              rules={[{ required: true, message: 'Vui lòng nhập cấu hình JSON' }]}
+              extra="Dán MCPcấu hình chuẩn, hệ thống tự trích xuất tên plugin. Hỗ trợ HTTP và Stdioloại"
+            >
+              <TextArea
+                rows={isMobile ? 12 : 16}
+                placeholder={`Ví dụ:
+{
+  "mcpServers": {
+    "exa": {
+      "type": "streamable_http",
+      "url": "https://mcp.exa.ai/mcp?exaApiKey=YOUR_API_KEY",
+      "headers": {}
+    }
+  }
+}`}
+                style={{ fontFamily: 'monospace', fontSize: '13px' }}
+              />
+            </Form.Item>
+
+            <Form.Item
+              label="Phân loại plugin"
+              name="category"
+              rules={[{ required: true, message: 'Vui lòng chọn phân loại plugin' }]}
+              extra="Chọn loại chức năng của plugin để AIAI khớp cảnh dùng một cách thông minh"
+            >
+              <Select placeholder="Vui lòng chọn phân loại">
+                <Select.Option value="search">Loại tìm kiếm  (Search) - Tìm kiếm web, truy vấn thông tin</Select.Option>
+                <Select.Option value="analysis">Loại phân tích  (Analysis) - Phân tích dữ liệu, xử lý văn bản</Select.Option>
+                <Select.Option value="filesystem">Hệ thống tệp  (FileSystem) - Thao tác đọc/ghi tệp</Select.Option>
+                <Select.Option value="database">Cơ sở dữ liệu  (Database) - Truy vấn cơ sở dữ liệu</Select.Option>
+                <Select.Option value="api">APIGọi  (API) - API dịch vụ bên thứ ba</Select.Option>
+                <Select.Option value="generation">Loại sinh nội dung  (Generation) - Công cụ sinh nội dung</Select.Option>
+                <Select.Option value="general">Chung  (General) - Chức năng khác</Select.Option>
+              </Select>
+            </Form.Item>
+          </Form>
+        </Modal>
+
+        {/* Modal xem danh sách công cụ */}
+        <Modal
+          title={
+            <Space>
+              <ToolOutlined style={{ color: token.colorPrimary }} />
+              <span>Danh sách công cụ khả dụng</span>
+              {viewingTools && viewingTools.tools.length > 0 && (
+                <Tag color="blue">{viewingTools.tools.length}  công cụ</Tag>
+              )}
+            </Space>
+          }
+          open={!!viewingTools}
+          onCancel={() => setViewingTools(null)}
+          footer={[
+            <Button key="close" type="primary" onClick={() => setViewingTools(null)}>
+              Đóng
+            </Button>,
+          ]}
+          width={isMobile ? '95%' : 800}
+          centered
+          styles={{
+            body: {
+              maxHeight: isMobile ? '60vh' : '70vh',
+              overflowY: 'auto',
+              padding: isMobile ? '16px' : '24px'
+            }
+          }}
+        >
+          {viewingTools && (
+            <Space direction="vertical" size="middle" style={{ width: '100%' }}>
+              {viewingTools.tools.length === 0 ? (
+                <Empty
+                  description="Plugin này không cung cấp công cụ nào"
+                  image={Empty.PRESENTED_IMAGE_SIMPLE}
+                  style={{ padding: '40px 0' }}
+                />
+              ) : (
+                viewingTools.tools.map((tool, index) => (
+                  <Card
+                    key={index}
+                    size="small"
+                    style={{
+                      borderRadius: 8,
+                      border: `1px solid ${token.colorBorderSecondary}`,
+                      boxShadow: `0 2px 4px ${alphaColor(token.colorText, 0.08)}`
+                    }}
+                    title={
+                      <Space>
+                        <Text code strong style={{ fontSize: isMobile ? '13px' : '14px', color: token.colorPrimary }}>
+                          {tool.name}
+                        </Text>
+                        <Tag color="processing" style={{ fontSize: '11px' }}>
+                          #{index + 1}
+                        </Tag>
+                      </Space>
+                    }
+                  >
+                    <Space direction="vertical" size="small" style={{ width: '100%' }}>
+                      {tool.description && (
+                        <div>
+                          <Text type="secondary" style={{ fontSize: isMobile ? '12px' : '13px', display: 'block', marginBottom: 4 }}>
+                            Mô tả:
+                          </Text>
+                          <Paragraph
+                            style={{
+                              margin: 0,
+                              fontSize: isMobile ? '12px' : '13px',
+                              padding: '8px 12px',
+                              background: token.colorBgLayout,
+                              borderRadius: 4,
+                              borderLeft: `3px solid ${token.colorInfo}`
+                            }}
+                          >
+                            {tool.description}
+                          </Paragraph>
+                        </div>
+                      )}
+                      {tool.inputSchema && (
+                        <div>
+                          <Text type="secondary" style={{ fontSize: isMobile ? '12px' : '13px', display: 'block', marginBottom: 4 }}>
+                            Tham số đầu vào:
+                          </Text>
+                          <pre
+                            style={{
+                              margin: 0,
+                              padding: isMobile ? '8px' : '12px',
+                              background: token.colorBgLayout,
+                              borderRadius: 4,
+                              fontSize: isMobile ? '11px' : '12px',
+                              overflow: 'auto',
+                              maxHeight: '200px',
+                              border: `1px solid ${token.colorBorderSecondary}`,
+                              lineHeight: 1.6
+                            }}
+                          >
+                            {JSON.stringify(tool.inputSchema, null, 2)}
+                          </pre>
+                        </div>
+                      )}
+                    </Space>
+                  </Card>
+                ))
+              )}
+            </Space>
+          )}
+        </Modal>
+      </div>
+    </>
+  );
+}

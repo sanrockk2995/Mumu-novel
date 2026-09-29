@@ -1,0 +1,1 @@
+"""Model dữ liệu Pydantic"""

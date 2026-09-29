@@ -1,0 +1,86 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+env/
+venv/
+ENV/
+*.egg-info/
+dist/
+build/
+.pytest_cache/
+
+# Node
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+.npm
+.eslintcache
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# File biến môi trường
+.env
+.env.local
+.env.*.local
+
+# File database (không gồm trong image)
+data/*.db
+backend/data/*.db
+postgres_data/
+
+# Database ChromaDB (không gồm trong image, sẽ sinh khi runtime)
+backend/data/chroma_db/
+
+# Model Embedding được Dockerfile tải từ ModelScope, tránh gửi cache cục bộ.
+backend/embedding/
+backend/embedding.*
+
+
+# File log
+logs/
+*.log
+
+# Git
+.git/
+.gitignore
+.gitattributes
+
+# Tài liệu
+docs/
+*.md
+!README.md
+!backend/app/skills/**/*.md
+
+# Test
+tests/
+test/
+*.test.js
+*.spec.js
+
+# File build frontend (sẽ build trong Docker)
+frontend/dist/
+frontend/build/
+
+# File tĩnh backend (sẽ copy từ giai đoạn build frontend)
+backend/static/
+
+# Định danh instance xưởng prompt (mỗi container cần sinh độc lập)
+backend/.instance_id
+
+# Liên quan Docker
+Dockerfile
+.dockerignore
+docker-compose*.yml

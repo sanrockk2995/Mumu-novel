@@ -1,0 +1,1473 @@
+import axios from 'axios';
+import { message } from 'antd';
+import { ssePost } from '../utils/sseClient';
+import type { SSEClientOptions } from '../utils/sseClient';
+import type {
+  User,
+  AuthUrlResponse,
+  Project,
+  ProjectCreate,
+  ProjectUpdate,
+  WorldBuildingResponse,
+  Outline,
+  OutlineCreate,
+  OutlineUpdate,
+  OutlineImportMode,
+  OutlineImportPreview,
+  OutlineImportResult,
+  OutlineReorderRequest,
+  OutlineExpansionRequest,
+  OutlineExpansionResponse,
+  BatchOutlineExpansionRequest,
+  BatchOutlineExpansionResponse,
+  Character,
+  CharacterUpdate,
+  Chapter,
+  ChapterCreate,
+  ChapterUpdate,
+  GenerateOutlineRequest,
+  GenerateCharacterRequest,
+  PolishTextRequest,
+  GenerateCharactersResponse,
+  GenerateOutlineResponse,
+  Settings,
+  SettingsUpdate,
+  WritingStyle,
+  WritingStyleCreate,
+  WritingStyleUpdate,
+  PresetStyle,
+  WritingStyleListResponse,
+  PromptWorkshopListResponse,
+  PromptWorkshopItem,
+  PromptSubmission,
+  PromptSubmissionCreate,
+  Announcement,
+  AnnouncementCreate,
+  AnnouncementListResponse,
+  AnnouncementStatusResponse,
+  AnnouncementUpdate,
+  MCPPlugin,
+  MCPPluginCreate,
+  MCPPluginUpdate,
+  MCPTestResult,
+  MCPTool,
+  MCPToolCallRequest,
+  MCPToolCallResponse,
+  APIKeyPreset,
+  PresetCreateRequest,
+  PresetUpdateRequest,
+  PresetListResponse,
+  ChapterPlanItem,
+  BookImportTask,
+  BookImportPreview,
+  BookImportApplyPayload,
+  BookImportCreateTaskPayload,
+  BookImportResult,
+  BookImportRetryResult,
+  BatchAnalysisStatusResponse,
+  BatchAnalyzeUnanalyzedRequest,
+  BatchAnalyzeUnanalyzedResponse,
+  AgentConversation,
+  AgentConversationDetail,
+  AgentToolCall,
+  AgentToolDecision,
+  AgentExecutionStep,
+} from '../types';
+
+interface MCPPluginSimpleCreate {
+  config_json: string;
+  enabled: boolean;
+}
+
+const api = axios.create({
+  baseURL: '/api',
+  timeout: 120000,
+  headers: {
+    'Content-Type': 'application/json',
+  },
+  withCredentials: true,
+});
+
+api.interceptors.request.use(
+  (config) => {
+    return config;
+  },
+  (error) => {
+    return Promise.reject(error);
+  }
+);
+
+api.interceptors.response.use(
+  (response) => {
+    return response.data;
+  },
+  (error) => {
+    let errorMessage = 'Yêu cầu thất bại';
+
+    if (error.response) {
+      const status = error.response.status;
+      const data = error.response.data;
+
+      switch (status) {
+        case 400:
+          errorMessage = data?.detail || 'Tham số yêu cầu không hợp lệ';
+          break;
+        case 401: {
+          const backendDetail = data?.detail || data?.message;
+          const unauthenticatedDetails = [
+            'Chưa đăng nhập',
+            'Cần đăng nhập',
+            'Chưa đăng nhập hoặc thiếu ID người dùng',
+            'Chưa đăng nhập, không thể refresh phiên',
+          ];
+          const isUnauthenticated = unauthenticatedDetails.includes(backendDetail);
+
+          errorMessage = backendDetail || 'Trạng thái đăng nhập đã hết hiệu lực, vui lòng đăng nhập lại';
+
+          if (isUnauthenticated && window.location.pathname !== '/login') {
+            window.location.href = '/login';
+          }
+          break;
+        }
+        case 403:
+          errorMessage = data?.detail || 'Không có quyền truy cập';
+          break;
+        case 404:
+          errorMessage = data?.detail || 'Tài nguyên yêu cầu không tồn tại';
+          break;
+        case 422:
+          errorMessage = data?.detail || 'Xác thực tham số yêu cầu thất bại';
+          if (data?.errors) {
+            console.error('Chi tiết lỗi xác thực:', data.errors);
+          }
+          break;
+        case 500:
+          errorMessage = data?.detail || 'Lỗi nội bộ máy chủ';
+          break;
+        case 503:
+          errorMessage = 'Dịch vụ tạm thời không khả dụng, vui lòng thử lại sau';
+          break;
+        default:
+          errorMessage = data?.detail || data?.message || `Yêu cầu thất bại (${status})`;
+      }
+    } else if (error.request) {
+      errorMessage = 'Lỗi mạng, vui lòng kiểm tra kết nối mạng';
+    } else {
+      errorMessage = error.message || 'Yêu cầu thất bại';
+    }
+
+    message.error(errorMessage);
+    console.error('API Error:', errorMessage, error);
+
+    return Promise.reject(error);
+  }
+);
+
+export const authApi = {
+  getAuthConfig: () => api.get<unknown, {
+    local_auth_enabled: boolean;
+    linuxdo_enabled: boolean;
+    email_auth_enabled: boolean;
+    email_register_enabled: boolean;
+  }>('/auth/config'),
+
+  localLogin: (username: string, password: string) =>
+    api.post<unknown, { success: boolean; message: string; user: User }>('/auth/local/login', { username, password }),
+
+  bindAccountLogin: (username: string, password: string) =>
+    api.post<unknown, { success: boolean; message: string; user: User }>('/auth/bind/login', { username, password }),
+
+  emailLogin: (payload: import('../types').EmailLoginPayload) =>
+    api.post<unknown, { success: boolean; message: string; user: User }>('/auth/email/login', payload),
+
+  sendEmailCode: (payload: import('../types').EmailSendCodePayload) =>
+    api.post<unknown, { success: boolean; message: string; expire_in_seconds: number; resend_interval_seconds: number }>('/auth/email/send-code', payload),
+
+  emailRegister: (payload: import('../types').EmailRegisterPayload) =>
+    api.post<unknown, { success: boolean; message: string; user: User }>('/auth/email/register', payload),
+
+  resetEmailPassword: (payload: import('../types').EmailResetPasswordPayload) =>
+    api.post<unknown, { success: boolean; message: string }>('/auth/email/reset-password', payload),
+
+  getLinuxDOAuthUrl: () => api.get<unknown, AuthUrlResponse>('/auth/linuxdo/url'),
+
+  getCurrentUser: () => api.get<unknown, User>('/auth/user'),
+
+  getPasswordStatus: () => api.get<unknown, {
+    has_password: boolean;
+    has_custom_password: boolean;
+    username: string | null;
+    default_password: string | null;
+  }>('/auth/password/status'),
+
+  setPassword: (password: string) =>
+    api.post<unknown, { success: boolean; message: string }>('/auth/password/set', { password }),
+
+  initializePassword: (password: string) =>
+    api.post<unknown, { success: boolean; message: string }>('/auth/password/initialize', { password }),
+
+  refreshSession: () => api.post<unknown, { message: string; expire_at: number; remaining_minutes: number }>('/auth/refresh'),
+
+  logout: () => api.post('/auth/logout'),
+};
+
+export const userApi = {
+  getCurrentUser: () => api.get<unknown, User>('/users/current'),
+
+  listUsers: () => api.get<unknown, User[]>('/users'),
+
+  setAdmin: (userId: string, isAdmin: boolean) =>
+    api.post('/users/set-admin', { user_id: userId, is_admin: isAdmin }),
+
+  deleteUser: (userId: string) => api.delete(`/users/${userId}`),
+
+  getUser: (userId: string) => api.get<unknown, User>(`/users/${userId}`),
+
+  resetPassword: (userId: string, newPassword?: string) =>
+    api.post<unknown, {
+      message: string;
+      user_id: string;
+      username: string;
+      default_password?: string;
+    }>('/users/reset-password', { user_id: userId, new_password: newPassword }),
+};
+
+export const settingsApi = {
+  getSettings: () => api.get<unknown, Settings>('/settings'),
+
+  saveSettings: (data: SettingsUpdate) =>
+    api.post<unknown, Settings>('/settings', data),
+
+  updateSettings: (data: SettingsUpdate) =>
+    api.put<unknown, Settings>('/settings', data),
+
+  deleteSettings: () => api.delete<unknown, { message: string; user_id: string }>('/settings'),
+
+  getAvailableModels: (params: { api_key?: string; api_base_url?: string; provider: string }) =>
+    api.get<unknown, { provider: string; models: Array<{ value: string; label: string; description: string }>; count?: number }>('/settings/models', { params }),
+
+  testApiConnection: (params: { api_key?: string; api_base_url?: string; provider: string; llm_model: string; temperature?: number; max_tokens?: number }) =>
+    api.post<unknown, {
+      success: boolean;
+      message: string;
+      response_time_ms?: number;
+      provider?: string;
+      model?: string;
+      response_preview?: string;
+      details?: Record<string, boolean | number>;
+      error?: string;
+      error_type?: string;
+      suggestions?: string[];
+    }>('/settings/test', params),
+
+  testCoverConnection: (params: { cover_api_provider: string; cover_api_key: string; cover_api_base_url?: string; cover_image_model: string }) =>
+    api.post<unknown, {
+      success: boolean;
+      message: string;
+      provider?: string;
+      model?: string;
+    }>('/settings/cover/test', params),
+
+  checkFunctionCalling: (params: { api_key?: string; api_base_url?: string; provider: string; llm_model: string }) =>
+    api.post<unknown, {
+      success: boolean;
+      supported: boolean;
+      message: string;
+      response_time_ms?: number;
+      provider?: string;
+      model?: string;
+      details?: {
+        finish_reason?: string;
+        has_tool_calls?: boolean;
+        tool_call_count?: number;
+        test_tool?: string;
+        test_prompt?: string;
+        response_type?: string;
+      };
+      tool_calls?: Array<{
+        id?: string;
+        type?: string;
+        function?: {
+          name: string;
+          arguments: string;
+        };
+      }>;
+      response_preview?: string;
+      error?: string;
+      error_type?: string;
+      suggestions?: string[];
+    }>('/settings/check-function-calling', params),
+
+  // Quản lý preset cấu hình API
+  getPresets: () =>
+    api.get<unknown, PresetListResponse>('/settings/presets'),
+
+  createPreset: (data: PresetCreateRequest) =>
+    api.post<unknown, APIKeyPreset>('/settings/presets', data),
+
+  updatePreset: (presetId: string, data: PresetUpdateRequest) =>
+    api.put<unknown, APIKeyPreset>(`/settings/presets/${presetId}`, data),
+
+  deletePreset: (presetId: string) =>
+    api.delete<unknown, { message: string; preset_id: string }>(`/settings/presets/${presetId}`),
+
+  activatePreset: (presetId: string) =>
+    api.post<unknown, { message: string; preset_id: string; preset_name: string }>(`/settings/presets/${presetId}/activate`),
+
+  testPreset: (presetId: string) =>
+    api.post<unknown, {
+      success: boolean;
+      message: string;
+      response_time_ms?: number;
+      provider?: string;
+      model?: string;
+      response_preview?: string;
+      details?: Record<string, boolean>;
+      error?: string;
+      error_type?: string;
+      suggestions?: string[];
+    }>(`/settings/presets/${presetId}/test`),
+
+  setChapterAnalysisPresetSelection: (presetId?: string) =>
+    api.put<unknown, { message: string; chapter_analysis_preset_id?: string; preset_name?: string }>('/settings/presets/usage/chapter-analysis', {
+      preset_id: presetId || null,
+    }),
+
+  createPresetFromCurrent: (name: string, description?: string) =>
+    api.post<unknown, APIKeyPreset>('/settings/presets/from-current', null, {
+      params: { name, description }
+    }),
+
+  getSystemSMTPSettings: () =>
+    api.get<unknown, import('../types').SystemSMTPSettings>('/settings/system/smtp'),
+
+  updateSystemSMTPSettings: (data: import('../types').SystemSMTPSettingsUpdate) =>
+    api.put<unknown, import('../types').SystemSMTPSettings>('/settings/system/smtp', data),
+
+  testSystemSMTPSettings: (data: { to_email: string }) =>
+    api.post<unknown, { success: boolean; message: string }>('/settings/system/smtp/test', data),
+};
+
+export const projectApi = {
+  getProjects: () => api.get<unknown, Project[]>('/projects'),
+
+  getProject: (id: string) => api.get<unknown, Project>(`/projects/${id}`),
+
+  createProject: (data: ProjectCreate) => api.post<unknown, Project>('/projects', data),
+
+  updateProject: (id: string, data: ProjectUpdate) =>
+    api.put<unknown, Project>(`/projects/${id}`, data),
+
+  deleteProject: (id: string) => api.delete(`/projects/${id}`),
+
+  generateCover: (id: string, overwrite: boolean = true) =>
+    api.post<unknown, {
+      project_id: string;
+      cover_status: string;
+      cover_image_url?: string;
+      cover_prompt?: string;
+      provider?: string;
+      model?: string;
+      message: string;
+    }>(`/projects/${id}/cover/generate`, { overwrite }),
+
+  downloadCover: async (id: string, filename?: string) => {
+    const response = await axios.get(`/api/projects/${id}/cover/download`, {
+      responseType: 'blob',
+      withCredentials: true,
+    });
+    const contentDisposition = response.headers['content-disposition'];
+    let finalFilename = filename || 'novel-cover.png';
+    if (contentDisposition) {
+      const utf8Match = /filename\*=UTF-8''(.+)/.exec(contentDisposition);
+      const basicMatch = /filename="?([^";]+)"?/.exec(contentDisposition);
+      if (utf8Match?.[1]) {
+        finalFilename = decodeURIComponent(utf8Match[1]);
+      } else if (basicMatch?.[1]) {
+        finalFilename = basicMatch[1];
+      }
+    }
+    const url = window.URL.createObjectURL(new Blob([response.data]));
+    const link = document.createElement('a');
+    link.href = url;
+    link.setAttribute('download', finalFilename);
+    document.body.appendChild(link);
+    link.click();
+    link.remove();
+    window.URL.revokeObjectURL(url);
+  },
+
+  exportProject: (id: string) => {
+    window.open(`/api/projects/${id}/export`, '_blank');
+  },
+
+  // Xuất dữ liệu dự án ra JSON
+  exportProjectData: async (id: string, options: {
+    include_generation_history?: boolean;
+    include_writing_styles?: boolean;
+    include_careers?: boolean;
+    include_memories?: boolean;
+    include_plot_analysis?: boolean;
+  }) => {
+    const response = await axios.post(
+      `/api/projects/${id}/export-data`,
+      options,
+      {
+        responseType: 'blob',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+      }
+    );
+
+    // Lấy tên file từ response header
+    const contentDisposition = response.headers['content-disposition'];
+    let filename = 'project_export.json';
+    if (contentDisposition) {
+      const matches = /filename\*=UTF-8''(.+)/.exec(contentDisposition);
+      if (matches && matches[1]) {
+        filename = decodeURIComponent(matches[1]);
+      }
+    }
+
+    // Tạo liên kết tải xuống
+    const url = window.URL.createObjectURL(new Blob([response.data]));
+    const link = document.createElement('a');
+    link.href = url;
+    link.setAttribute('download', filename);
+    document.body.appendChild(link);
+    link.click();
+    link.remove();
+    window.URL.revokeObjectURL(url);
+  },
+
+  // Xác thực file nhập
+  validateImportFile: (file: File) => {
+    const formData = new FormData();
+    formData.append('file', file);
+    return api.post<unknown, {
+      valid: boolean;
+      version: string;
+      project_name?: string;
+      statistics: Record<string, number>;
+      errors: string[];
+      warnings: string[];
+    }>('/projects/validate-import', formData, {
+      headers: { 'Content-Type': 'multipart/form-data' },
+    });
+  },
+
+  // Nhập dự án
+  importProject: (file: File) => {
+    const formData = new FormData();
+    formData.append('file', file);
+    return api.post<unknown, {
+      success: boolean;
+      project_id?: string;
+      message: string;
+      statistics: Record<string, number>;
+      warnings: string[];
+    }>('/projects/import', formData, {
+      headers: { 'Content-Type': 'multipart/form-data' },
+    });
+  },
+};
+
+export const bookImportApi = {
+  createTask: (params: BookImportCreateTaskPayload) => {
+    const formData = new FormData();
+    formData.append('file', params.file);
+    const tailChapterCount = params.tail_chapter_count ?? 10;
+    formData.append('extract_mode', params.extract_mode ?? 'tail');
+    formData.append('tail_chapter_count', String(tailChapterCount));
+
+    return api.post<unknown, { task_id: string; status: BookImportTask['status'] }>(
+      '/book-import/tasks',
+      formData,
+      { headers: { 'Content-Type': 'multipart/form-data' } }
+    );
+  },
+
+  getTaskStatus: (taskId: string) =>
+    api.get<unknown, BookImportTask>(`/book-import/tasks/${taskId}`),
+
+  getPreview: (taskId: string) =>
+    api.get<unknown, BookImportPreview>(`/book-import/tasks/${taskId}/preview`),
+
+  applyImport: (taskId: string, payload: BookImportApplyPayload) =>
+    api.post<unknown, BookImportResult>(`/book-import/tasks/${taskId}/apply`, payload),
+
+  applyImportStream: (
+    taskId: string,
+    payload: BookImportApplyPayload,
+    options?: SSEClientOptions,
+  ) => ssePost<BookImportResult>(
+    `/api/book-import/tasks/${taskId}/apply-stream`,
+    payload,
+    options,
+  ),
+
+  retryFailedStepsStream: (
+    taskId: string,
+    steps: string[],
+    options?: SSEClientOptions,
+  ) => ssePost<BookImportRetryResult>(
+    `/api/book-import/tasks/${taskId}/retry-stream`,
+    { steps },
+    options,
+  ),
+
+  cancelTask: (taskId: string) =>
+    api.delete<unknown, { success: boolean; message: string }>(`/book-import/tasks/${taskId}`),
+};
+
+export const outlineApi = {
+  getOutlines: (projectId: string) =>
+    api.get<unknown, { total: number; items: Outline[] }>(`/outlines/project/${projectId}`).then(res => res.items),
+
+  getOutline: (id: string) => api.get<unknown, Outline>(`/outlines/${id}`),
+
+  createOutline: (data: OutlineCreate) => api.post<unknown, Outline>('/outlines', data),
+
+  updateOutline: (id: string, data: OutlineUpdate) =>
+    api.put<unknown, Outline>(`/outlines/${id}`, data),
+
+  deleteOutline: (id: string) => api.delete(`/outlines/${id}`),
+
+  exportOutlines: async (projectId: string, outlineIds?: string[]) => {
+    const response = await axios.post(
+      '/api/outlines/export',
+      { project_id: projectId, outline_ids: outlineIds },
+      { responseType: 'blob', withCredentials: true },
+    );
+
+    const contentDisposition = response.headers['content-disposition'] as string | undefined;
+    let filename = 'outlines_export.json';
+    if (contentDisposition) {
+      const encodedMatch = /filename\*=UTF-8''([^;]+)/i.exec(contentDisposition);
+      const plainMatch = /filename="?([^";]+)"?/i.exec(contentDisposition);
+      if (encodedMatch?.[1]) {
+        try {
+          filename = decodeURIComponent(encodedMatch[1]);
+        } catch {
+          filename = encodedMatch[1];
+        }
+      } else if (plainMatch?.[1]) {
+        filename = plainMatch[1].trim();
+      }
+    }
+
+    const url = window.URL.createObjectURL(response.data as Blob);
+    const link = document.createElement('a');
+    link.href = url;
+    link.download = filename;
+    document.body.appendChild(link);
+    link.click();
+    link.remove();
+    window.URL.revokeObjectURL(url);
+  },
+
+  previewImport: (projectId: string, mode: OutlineImportMode, file: File) => {
+    const formData = new FormData();
+    formData.append('project_id', projectId);
+    formData.append('mode', mode);
+    formData.append('file', file);
+    return api.post<unknown, OutlineImportPreview>('/outlines/import/preview', formData, {
+      headers: { 'Content-Type': 'multipart/form-data' },
+    });
+  },
+
+  importOutlines: (projectId: string, mode: OutlineImportMode, file: File) => {
+    const formData = new FormData();
+    formData.append('project_id', projectId);
+    formData.append('mode', mode);
+    formData.append('file', file);
+    return api.post<unknown, OutlineImportResult>('/outlines/import', formData, {
+      headers: { 'Content-Type': 'multipart/form-data' },
+    });
+  },
+
+  reorderOutlines: (data: OutlineReorderRequest) =>
+    api.post<unknown, { message: string; updated_outlines: number; updated_chapters: number }>('/outlines/reorder', data),
+
+  generateOutline: (data: GenerateOutlineRequest) =>
+    api.post<unknown, { total: number; items: Outline[] }>('/outlines/generate', data).then(res => res.items),
+
+  // Lấy chương liên kết với đề cương
+  getOutlineChapters: (outlineId: string) =>
+    api.get<unknown, {
+      has_chapters: boolean;
+      outline_id: string;
+      outline_title: string;
+      chapter_count: number;
+      chapters: Array<{
+        id: string;
+        chapter_number: number;
+        title: string;
+        summary: string;
+        sub_index: number;
+        status: string;
+        word_count: number;
+      }>;
+      expansion_plans: Array<{
+        sub_index: number;
+        title: string;
+        plot_summary: string;
+        key_events: string[];
+        character_focus: string[];
+        emotional_tone: string;
+        narrative_goal: string;
+        conflict_type: string;
+        estimated_words: number;
+        scenes?: Array<{
+          location: string;
+          characters: string[];
+          purpose: string;
+        }> | null;
+      }> | null;
+    }>(`/outlines/${outlineId}/chapters`),
+
+  // Mở rộng một đề cương thành nhiều chương
+  expandOutline: (outlineId: string, data: OutlineExpansionRequest) =>
+    api.post<unknown, OutlineExpansionResponse>(`/outlines/${outlineId}/expand`, data),
+
+  // Tạo chương theo kế hoạch có sẵn (tránh gọi AI trùng lặp)
+  createChaptersFromPlans: (outlineId: string, chapterPlans: ChapterPlanItem[]) =>
+    api.post<unknown, {
+      outline_id: string;
+      outline_title: string;
+      chapters_created: number;
+      created_chapters: Array<{
+        id: string;
+        chapter_number: number;
+        title: string;
+        summary: string;
+        outline_id: string;
+        sub_index: number;
+        status: string;
+      }>;
+    }>(`/outlines/${outlineId}/create-chapters-from-plans`, { chapter_plans: chapterPlans }),
+
+  // Mở rộng hàng loạt đề cương
+  batchExpandOutlines: (data: BatchOutlineExpansionRequest) =>
+    api.post<unknown, BatchOutlineExpansionResponse>('/outlines/batch-expand', data),
+};
+
+export const characterApi = {
+  getCharacters: (projectId: string) =>
+    api.get<unknown, { total: number; items: Character[] }>(`/characters/project/${projectId}`).then(res => res.items),
+
+  getCharacter: (id: string) => api.get<unknown, Character>(`/characters/${id}`),
+
+  createCharacter: (data: {
+    project_id: string;
+    name: string;
+    age?: string;
+    gender?: string;
+    is_organization?: boolean;
+    role_type?: string;
+    personality?: string;
+    background?: string;
+    appearance?: string;
+    relationships?: string;
+    organization_type?: string;
+    organization_purpose?: string;
+    organization_members?: string;
+    traits?: string;
+    avatar_url?: string;
+    power_level?: number;
+    location?: string;
+    motto?: string;
+    color?: string;
+  }) =>
+    api.post<unknown, Character>('/characters', data),
+
+  updateCharacter: (id: string, data: CharacterUpdate) =>
+    api.put<unknown, Character>(`/characters/${id}`, data),
+
+  deleteCharacter: (id: string) => api.delete(`/characters/${id}`),
+
+  generateCharacter: (data: GenerateCharacterRequest) =>
+    api.post<unknown, Character>('/characters/generate', data),
+
+  // Xuất nhân vật/tổ chức
+  exportCharacters: async (characterIds: string[]) => {
+    const response = await axios.post(
+      '/api/characters/export',
+      { character_ids: characterIds },
+      {
+        responseType: 'blob',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+      }
+    );
+
+    // Lấy tên file từ response header
+    const contentDisposition = response.headers['content-disposition'];
+    let filename = 'characters_export.json';
+    if (contentDisposition) {
+      const matches = /filename=(.+)/.exec(contentDisposition);
+      if (matches && matches[1]) {
+        filename = matches[1];
+      }
+    }
+
+    // Tạo liên kết tải xuống
+    const url = window.URL.createObjectURL(new Blob([response.data]));
+    const link = document.createElement('a');
+    link.href = url;
+    link.setAttribute('download', filename);
+    document.body.appendChild(link);
+    link.click();
+    link.remove();
+    window.URL.revokeObjectURL(url);
+  },
+
+  // Xác thực file nhập
+  validateImportCharacters: (file: File) => {
+    const formData = new FormData();
+    formData.append('file', file);
+    return api.post<unknown, {
+      valid: boolean;
+      version: string;
+      statistics: { characters: number; organizations: number };
+      errors: string[];
+      warnings: string[];
+    }>('/characters/validate-import', formData, {
+      headers: { 'Content-Type': 'multipart/form-data' },
+    });
+  },
+
+  // Nhập nhân vật/tổ chức
+  importCharacters: (projectId: string, file: File) => {
+    const formData = new FormData();
+    formData.append('file', file);
+    return api.post<unknown, {
+      success: boolean;
+      message: string;
+      statistics: {
+        total: number;
+        imported: number;
+        skipped: number;
+        errors: number;
+      };
+      details: {
+        imported_characters: string[];
+        imported_organizations: string[];
+        skipped: string[];
+        errors: string[];
+      };
+      warnings: string[];
+    }>(`/characters/import?project_id=${projectId}`, formData, {
+      headers: { 'Content-Type': 'multipart/form-data' },
+    });
+  },
+};
+
+export const chapterApi = {
+  getChapters: (projectId: string) =>
+    api.get<unknown, { total: number; items: Chapter[] }>(`/chapters/project/${projectId}`).then(res => res.items),
+
+  getChapter: (id: string) => api.get<unknown, Chapter>(`/chapters/${id}`),
+
+  createChapter: (data: ChapterCreate) => api.post<unknown, Chapter>('/chapters', data),
+
+  updateChapter: (id: string, data: ChapterUpdate) =>
+    api.put<unknown, Chapter>(`/chapters/${id}`, data),
+
+  deleteChapter: (id: string) => api.delete(`/chapters/${id}`),
+
+  checkCanGenerate: (chapterId: string) =>
+    api.get<unknown, import('../types').ChapterCanGenerateResponse>(`/chapters/${chapterId}/can-generate`),
+
+  getBatchAnalysisStatuses: (projectId: string, chapterIds?: string[]) =>
+    api.post<unknown, BatchAnalysisStatusResponse>(`/chapters/project/${projectId}/analysis/statuses`, {
+      chapter_ids: chapterIds && chapterIds.length > 0 ? chapterIds : undefined,
+    }),
+
+  batchAnalyzeUnanalyzed: (projectId: string, data?: BatchAnalyzeUnanalyzedRequest) =>
+    api.post<unknown, BatchAnalyzeUnanalyzedResponse>(`/chapters/project/${projectId}/analysis/analyze-unanalyzed`, {
+      chapter_ids: data?.chapter_ids && data.chapter_ids.length > 0 ? data.chapter_ids : undefined,
+    }),
+
+  // Liên quan đến tạo lại chương
+  getRegenerationTasks: (chapterId: string, limit?: number) =>
+    api.get<unknown, {
+      chapter_id: string;
+      total: number;
+      tasks: Array<{
+        task_id: string;
+        status: string;
+        version_number: number | null;
+        version_note: string | null;
+        original_word_count: number | null;
+        regenerated_word_count: number | null;
+        created_at: string | null;
+        completed_at: string | null;
+      }>;
+    }>(`/chapters/${chapterId}/regeneration/tasks`, { params: { limit } }),
+
+  // Liên quan đến viết lại cục bộ
+  partialRegenerateStream: (
+    chapterId: string,
+    data: {
+      selected_text: string;
+      start_position: number;
+      end_position: number;
+      user_instructions: string;
+      context_chars?: number;
+      style_id?: number;
+      length_mode?: 'similar' | 'expand' | 'condense' | 'custom';
+      target_word_count?: number;
+    },
+    options?: SSEClientOptions
+  ) => ssePost<{
+    new_text: string;
+    word_count: number;
+    original_word_count: number;
+    start_position: number;
+    end_position: number;
+  }>(
+    `/api/chapters/${chapterId}/partial-regenerate-stream`,
+    data,
+    options
+  ),
+
+  applyPartialRegenerate: (chapterId: string, data: {
+    new_text: string;
+    start_position: number;
+    end_position: number;
+  }) =>
+    api.post<unknown, {
+      success: boolean;
+      chapter_id: string;
+      word_count: number;
+      old_word_count: number;
+      message: string;
+    }>(`/chapters/${chapterId}/apply-partial-regenerate`, data),
+};
+
+export const writingStyleApi = {
+  // Lấy danh sách phong cách preset
+  getPresetStyles: () =>
+    api.get<unknown, PresetStyle[]>('/writing-styles/presets/list'),
+
+  // Lấy tất cả phong cách của người dùng (API mới)
+  getUserStyles: () =>
+    api.get<unknown, WritingStyleListResponse>('/writing-styles/user'),
+
+  // Lấy tất cả phong cách của dự án (giữ tương thích ngược)
+  getProjectStyles: (projectId: string) =>
+    api.get<unknown, WritingStyleListResponse>(`/writing-styles/project/${projectId}`),
+
+  // Tạo phong cách mới (dựa trên preset hoặc tùy chỉnh)
+  createStyle: (data: WritingStyleCreate) =>
+    api.post<unknown, WritingStyle>('/writing-styles', data),
+
+  // Cập nhật phong cách
+  updateStyle: (styleId: number, data: WritingStyleUpdate) =>
+    api.put<unknown, WritingStyle>(`/writing-styles/${styleId}`, data),
+
+  // Xóa phong cách
+  deleteStyle: (styleId: number) =>
+    api.delete<unknown, { message: string }>(`/writing-styles/${styleId}`),
+
+  // Đặt phong cách mặc định
+  setDefaultStyle: (styleId: number, projectId: string) =>
+    api.post<unknown, WritingStyle>(`/writing-styles/${styleId}/set-default`, { project_id: projectId }),
+
+  // Khởi tạo phong cách mặc định cho dự án (nếu chưa có phong cách nào)
+  initializeDefaultStyles: (projectId: string) =>
+    api.post<unknown, WritingStyleListResponse>(`/writing-styles/project/${projectId}/initialize`, {}),
+};
+
+export const promptWorkshopApi = {
+  // Kiểm tra trạng thái dịch vụ
+  getStatus: () =>
+    api.get<unknown, { mode: string; instance_id: string; cloud_url?: string; cloud_connected?: boolean }>('/prompt-workshop/status'),
+
+  // Lấy danh sách prompt workshop
+  getItems: (params?: {
+    category?: string;
+    search?: string;
+    tags?: string;
+    sort?: 'newest' | 'popular' | 'downloads';
+    page?: number;
+    limit?: number;
+  }) => api.get<unknown, PromptWorkshopListResponse>('/prompt-workshop/items', { params }),
+
+  // Lấy một prompt
+  getItem: (itemId: string) =>
+    api.get<unknown, { success: boolean; data: PromptWorkshopItem }>(`/prompt-workshop/items/${itemId}`),
+
+  // Nhập vào local
+  importItem: (itemId: string, customName?: string) =>
+    api.post<unknown, { success: boolean; message: string; writing_style: WritingStyle }>(
+      `/prompt-workshop/items/${itemId}/import`,
+      { custom_name: customName }
+    ),
+
+  // Thích
+  toggleLike: (itemId: string) =>
+    api.post<unknown, { success: boolean; liked: boolean; like_count: number }>(
+      `/prompt-workshop/items/${itemId}/like`
+    ),
+
+  // Gửi prompt
+  submit: (data: PromptSubmissionCreate) =>
+    api.post<unknown, { success: boolean; message: string; submission: PromptSubmission }>('/prompt-workshop/submit', data),
+
+  // Bài gửi của tôi
+  getMySubmissions: (status?: string) =>
+    api.get<unknown, { success: boolean; data: { total: number; items: PromptSubmission[] } }>(
+      '/prompt-workshop/my-submissions',
+      { params: { status } }
+    ),
+
+  // Rút lại bài gửi (trạng thái pending)
+  withdrawSubmission: (submissionId: string) =>
+    api.delete<unknown, { success: boolean; message: string }>(`/prompt-workshop/submissions/${submissionId}`),
+
+  // Xóa bản ghi gửi (mọi trạng thái, cần force=true)
+  deleteSubmission: (submissionId: string) =>
+    api.delete<unknown, { success: boolean; message: string }>(`/prompt-workshop/submissions/${submissionId}`, {
+      params: { force: true }
+    }),
+
+  // ========== API quản trị viên (chỉ khả dụng ở chế độ server) ==========
+  
+  // Lấy danh sách chờ duyệt
+  adminGetSubmissions: (params?: { status?: string; source?: string; page?: number; limit?: number }) =>
+    api.get<unknown, {
+      success: boolean;
+      data: {
+        total: number;
+        pending_count: number;
+        page: number;
+        limit: number;
+        items: PromptSubmission[];
+      };
+    }>('/prompt-workshop/admin/submissions', { params }),
+
+  // Duyệt bài gửi
+  adminReviewSubmission: (submissionId: string, data: { action: 'approve' | 'reject'; review_note?: string; category?: string; tags?: string[] }) =>
+    api.post<unknown, { success: boolean; message: string; workshop_item?: PromptWorkshopItem; submission?: PromptSubmission }>(
+      `/prompt-workshop/admin/submissions/${submissionId}/review`,
+      data
+    ),
+
+  // Thêm prompt chính thức
+  adminCreateItem: (data: { name: string; description?: string; prompt_content: string; category: string; tags?: string[] }) =>
+    api.post<unknown, { success: boolean; item: PromptWorkshopItem }>('/prompt-workshop/admin/items', data),
+
+  // Chỉnh sửa prompt
+  adminUpdateItem: (itemId: string, data: { name?: string; description?: string; prompt_content?: string; category?: string; tags?: string[]; status?: string }) =>
+    api.put<unknown, { success: boolean; item: PromptWorkshopItem }>(`/prompt-workshop/admin/items/${itemId}`, data),
+
+  // Xóa prompt
+  adminDeleteItem: (itemId: string) =>
+    api.delete<unknown, { success: boolean; message: string }>(`/prompt-workshop/admin/items/${itemId}`),
+
+  // Lấy dữ liệu thống kê
+  adminGetStats: () =>
+    api.get<unknown, {
+      success: boolean;
+      data: {
+        total_items: number;
+        total_official: number;
+        total_pending: number;
+        total_downloads: number;
+        total_likes: number;
+      };
+    }>('/prompt-workshop/admin/stats'),
+};
+
+export const announcementApi = {
+  getStatus: () =>
+    api.get<unknown, AnnouncementStatusResponse>('/announcements/status'),
+
+  list: (params?: { page?: number; limit?: number }) =>
+    api.get<unknown, AnnouncementListResponse>('/announcements', { params }),
+
+  sync: (params?: { since?: string; limit?: number }) =>
+    api.get<unknown, AnnouncementListResponse>('/announcements/sync', { params }),
+
+  adminList: (params?: { status?: string; q?: string; page?: number; limit?: number; include_expired?: boolean }) =>
+    api.get<unknown, AnnouncementListResponse>('/announcements/admin/items', { params }),
+
+  adminCreate: (data: AnnouncementCreate) =>
+    api.post<unknown, { success: boolean; item: Announcement }>('/announcements/admin/items', data),
+
+  adminUpdate: (id: string, data: AnnouncementUpdate) =>
+    api.put<unknown, { success: boolean; item: Announcement }>(`/announcements/admin/items/${id}`, data),
+
+  adminDelete: (id: string) =>
+    api.delete<unknown, { success: boolean; message: string }>(`/announcements/admin/items/${id}`),
+
+  adminPublish: (id: string) =>
+    api.post<unknown, { success: boolean; item: Announcement }>(`/announcements/admin/items/${id}/publish`),
+
+  adminHide: (id: string) =>
+    api.post<unknown, { success: boolean; item: Announcement }>(`/announcements/admin/items/${id}/hide`),
+};
+
+export const polishApi = {
+  polishText: (data: PolishTextRequest) =>
+    api.post<unknown, { polished_text: string }>('/polish', data),
+
+  polishBatch: (texts: string[]) =>
+    api.post<unknown, { polished_texts: string[] }>('/polish/batch', { texts }),
+};
+export const inspirationApi = {
+  // Tạo gợi ý tùy chọn
+  generateOptions: (data: {
+    step: 'title' | 'description' | 'theme' | 'genre';
+    context: {
+      title?: string;
+      description?: string;
+      theme?: string;
+    };
+  }) =>
+    api.post<unknown, {
+      prompt?: string;
+      options: string[];
+      error?: string;
+    }>('/inspiration/generate-options', data),
+
+  // Tạo lại tùy chọn dựa trên phản hồi người dùng (mới)
+  refineOptions: (data: {
+    step: 'title' | 'description' | 'theme' | 'genre';
+    context: {
+      initial_idea?: string;
+      title?: string;
+      description?: string;
+      theme?: string;
+    };
+    feedback: string;
+    previous_options?: string[];
+  }) =>
+    api.post<unknown, {
+      prompt?: string;
+      options: string[];
+      error?: string;
+    }>('/inspiration/refine-options', data),
+
+  // Bổ sung thông minh thông tin còn thiếu
+  quickGenerate: (data: {
+    title?: string;
+    description?: string;
+    theme?: string;
+    genre?: string | string[];
+  }) =>
+    api.post<unknown, {
+      title: string;
+      description: string;
+      theme: string;
+      genre: string[];
+      narrative_perspective: string;
+    }>('/inspiration/quick-generate', data),
+};
+
+export default api;
+
+
+export const wizardStreamApi = {
+  generateWorldBuildingStream: (
+    data: {
+      title: string;
+      description: string;
+      theme: string;
+      genre: string | string[];
+      narrative_perspective?: string;
+      target_words?: number;
+      chapter_count?: number;
+      character_count?: number;
+      outline_mode?: 'one-to-one' | 'one-to-many';  // Thêm tham số chế độ đề cương
+      provider?: string;
+      model?: string;
+    },
+    options?: SSEClientOptions
+  ) => ssePost<WorldBuildingResponse>(
+    '/api/wizard-stream/world-building',
+    data,
+    options
+  ),
+
+  generateCharactersStream: (
+    data: {
+      project_id: string;
+      count?: number;
+      world_context?: Record<string, string>;
+      theme?: string;
+      genre?: string;
+      requirements?: string;
+      provider?: string;
+      model?: string;
+    },
+    options?: SSEClientOptions
+  ) => ssePost<GenerateCharactersResponse>(
+    '/api/wizard-stream/characters',
+    data,
+    options
+  ),
+
+  generateCareerSystemStream: (
+    data: {
+      project_id: string;
+      provider?: string;
+      model?: string;
+    },
+    options?: SSEClientOptions
+  ) => ssePost<{
+    project_id: string;
+    main_careers_count: number;
+    sub_careers_count: number;
+    main_careers: string[];
+    sub_careers: string[];
+  }>(
+    '/api/wizard-stream/career-system',
+    data,
+    options
+  ),
+
+  generateCompleteOutlineStream: (
+    data: {
+      project_id: string;
+      chapter_count: number;
+      narrative_perspective: string;
+      target_words?: number;
+      requirements?: string;
+      provider?: string;
+      model?: string;
+    },
+    options?: SSEClientOptions
+  ) => ssePost<GenerateOutlineResponse>(
+    '/api/wizard-stream/outline',
+    data,
+    options
+  ),
+
+  updateWorldBuildingStream: (
+    projectId: string,
+    data: {
+      time_period?: string;
+      location?: string;
+      atmosphere?: string;
+      rules?: string;
+    },
+    options?: SSEClientOptions
+  ) => ssePost<WorldBuildingResponse>(
+    `/api/wizard-stream/world-building/${projectId}`,
+    data,
+    options
+  ),
+
+  regenerateWorldBuildingStream: (
+    projectId: string,
+    data?: {
+      provider?: string;
+      model?: string;
+    },
+    options?: SSEClientOptions
+  ) => ssePost<WorldBuildingResponse>(
+    `/api/wizard-stream/world-building/${projectId}/regenerate`,
+    data || {},
+    options
+  ),
+
+  cleanupWizardDataStream: (
+    projectId: string,
+    options?: SSEClientOptions
+  ) => ssePost<{ message: string; deleted: { characters: number; outlines: number; chapters: number } }>(
+    `/api/wizard-stream/cleanup/${projectId}`,
+    {},
+    options
+  ),
+};
+
+export const mcpPluginApi = {
+  // Lấy tất cả plugin
+  getPlugins: () =>
+    api.get<unknown, MCPPlugin[]>('/mcp/plugins'),
+
+  // Lấy một plugin
+  getPlugin: (id: string) =>
+    api.get<unknown, MCPPlugin>(`/mcp/plugins/${id}`),
+
+  // Tạo plugin
+  createPlugin: (data: MCPPluginCreate) =>
+    api.post<unknown, MCPPlugin>('/mcp/plugins', data),
+
+  // Tạo plugin đơn giản (qua JSON cấu hình MCP chuẩn)
+  createPluginSimple: (data: MCPPluginSimpleCreate) =>
+    api.post<unknown, MCPPlugin>('/mcp/plugins/simple', data),
+
+  // Cập nhật plugin
+  updatePlugin: (id: string, data: MCPPluginUpdate) =>
+    api.put<unknown, MCPPlugin>(`/mcp/plugins/${id}`, data),
+
+  // Xóa plugin
+  deletePlugin: (id: string) =>
+    api.delete<unknown, { message: string }>(`/mcp/plugins/${id}`),
+
+  // Bật/tắt plugin
+  togglePlugin: (id: string, enabled: boolean) =>
+    api.post<unknown, MCPPlugin>(`/mcp/plugins/${id}/toggle`, null, { params: { enabled } }),
+
+  // Kiểm tra kết nối plugin
+  testPlugin: (id: string) =>
+    api.post<unknown, MCPTestResult>(`/mcp/plugins/${id}/test`),
+
+  // Lấy danh sách công cụ plugin
+  getPluginTools: (id: string) =>
+    api.get<unknown, { tools: MCPTool[] }>(`/mcp/plugins/${id}/tools`),
+
+  // Gọi công cụ
+  callTool: (data: MCPToolCallRequest) =>
+    api.post<unknown, MCPToolCallResponse>('/mcp/call', data),
+};
+
+// API quản trị viên
+export const adminApi = {
+  // Lấy danh sách người dùng
+  getUsers: () =>
+    api.get<unknown, { total: number; users: User[] }>('/admin/users'),
+
+  // Thêm người dùng
+  createUser: (data: {
+    username: string;
+    display_name: string;
+    password?: string;
+    avatar_url?: string;
+    trust_level?: number;
+    is_admin?: boolean;
+  }) =>
+    api.post<unknown, {
+      success: boolean;
+      message: string;
+      user: User;
+      default_password?: string;
+    }>('/admin/users', data),
+
+  // Chỉnh sửa người dùng
+  updateUser: (userId: string, data: {
+    display_name?: string;
+    avatar_url?: string;
+    trust_level?: number;
+  }) =>
+    api.put<unknown, {
+      success: boolean;
+      message: string;
+      user: User;
+    }>(`/admin/users/${userId}`, data),
+
+  // Chuyển trạng thái người dùng (bật/tắt)
+  toggleUserStatus: (userId: string, isActive: boolean) =>
+    api.post<unknown, {
+      success: boolean;
+      message: string;
+      is_active: boolean;
+    }>(`/admin/users/${userId}/toggle-status`, { is_active: isActive }),
+
+  // Đặt lại mật khẩu
+  resetPassword: (userId: string, newPassword?: string) =>
+    api.post<unknown, {
+      success: boolean;
+      message: string;
+      new_password: string;
+    }>(`/admin/users/${userId}/reset-password`, { new_password: newPassword }),
+
+  // Xóa người dùng
+  deleteUser: (userId: string) =>
+    api.delete<unknown, {
+      success: boolean;
+      message: string;
+    }>(`/admin/users/${userId}`),
+};
+
+// API quản lý phục bút
+export const foreshadowApi = {
+  // Lấy danh sách phục bút của dự án
+  getProjectForeshadows: (projectId: string, params?: {
+    status?: string;
+    category?: string;
+    source_type?: string;
+    is_long_term?: boolean;
+    page?: number;
+    limit?: number;
+  }) =>
+    api.get<unknown, import('../types').ForeshadowListResponse>(
+      `/foreshadows/projects/${projectId}`,
+      { params }
+    ),
+
+  // Lấy thống kê phục bút
+  getForeshadowStats: (projectId: string, currentChapter?: number) =>
+    api.get<unknown, import('../types').ForeshadowStats>(
+      `/foreshadows/projects/${projectId}/stats`,
+      { params: { current_chapter: currentChapter } }
+    ),
+
+  // Lấy ngữ cảnh phục bút của chương
+  getChapterContext: (projectId: string, chapterNumber: number, params?: {
+    include_pending?: boolean;
+    include_overdue?: boolean;
+    lookahead?: number;
+  }) =>
+    api.get<unknown, import('../types').ForeshadowContextResponse>(
+      `/foreshadows/projects/${projectId}/context/${chapterNumber}`,
+      { params }
+    ),
+
+  // Lấy phục bút chờ thu hồi
+  getPendingResolveForeshadows: (projectId: string, currentChapter: number, lookahead?: number) =>
+    api.get<unknown, { total: number; items: import('../types').Foreshadow[] }>(
+      `/foreshadows/projects/${projectId}/pending-resolve`,
+      { params: { current_chapter: currentChapter, lookahead } }
+    ),
+
+  // Lấy một phục bút
+  getForeshadow: (foreshadowId: string) =>
+    api.get<unknown, import('../types').Foreshadow>(`/foreshadows/${foreshadowId}`),
+
+  // Tạo phục bút
+  createForeshadow: (data: import('../types').ForeshadowCreate) =>
+    api.post<unknown, import('../types').Foreshadow>('/foreshadows', data),
+
+  // Cập nhật phục bút
+  updateForeshadow: (foreshadowId: string, data: import('../types').ForeshadowUpdate) =>
+    api.put<unknown, import('../types').Foreshadow>(`/foreshadows/${foreshadowId}`, data),
+
+  // Xóa phục bút
+  deleteForeshadow: (foreshadowId: string) =>
+    api.delete<unknown, { message: string; id: string }>(`/foreshadows/${foreshadowId}`),
+
+  // Đánh dấu phục bút là đã gieo
+  plantForeshadow: (foreshadowId: string, data: import('../types').PlantForeshadowRequest) =>
+    api.post<unknown, import('../types').Foreshadow>(`/foreshadows/${foreshadowId}/plant`, data),
+
+  // Đánh dấu phục bút là đã thu hồi
+  resolveForeshadow: (foreshadowId: string, data: import('../types').ResolveForeshadowRequest) =>
+    api.post<unknown, import('../types').Foreshadow>(`/foreshadows/${foreshadowId}/resolve`, data),
+
+  // Đánh dấu phục bút là đã loại bỏ
+  abandonForeshadow: (foreshadowId: string, reason?: string) =>
+    api.post<unknown, import('../types').Foreshadow>(
+      `/foreshadows/${foreshadowId}/abandon`,
+      null,
+      { params: { reason } }
+    ),
+
+  // Đồng bộ phục bút từ kết quả phân tích
+  syncFromAnalysis: (projectId: string, data: import('../types').SyncFromAnalysisRequest) =>
+    api.post<unknown, import('../types').SyncFromAnalysisResponse>(
+      `/foreshadows/projects/${projectId}/sync-from-analysis`,
+      data
+    ),
+};
+
+export interface ProjectAgentStreamCallbacks {
+  onConversation?: (data: { conversation_id: string; title: string }) => void;
+  onChunk?: (content: string) => void;
+  onToolProposed?: (toolCall: AgentToolCall) => void;
+  onToolExecuted?: (data: {
+    tool_call: AgentToolCall;
+    resources: string[];
+    approval_mode: 'automatic' | 'manual';
+  }) => void;
+  onStepStart?: (step: AgentExecutionStep) => void;
+  onStepUpdate?: (step: AgentExecutionStep) => void;
+  onFinalStart?: (data: { message_id: string }) => void;
+  onFinalChunk?: (content: string) => void;
+  onFinalDone?: (data: { message_id: string }) => void;
+  onResult?: (data: { conversation_id: string; message_id: string; status: string }) => void;
+  onError?: (error: string) => void;
+}
+
+export const projectAgentApi = {
+  listConversations: (projectId: string) =>
+    api.get<unknown, AgentConversation[]>(`/projects/${projectId}/agent/conversations`),
+
+  createConversation: (projectId: string, title?: string) =>
+    api.post<unknown, AgentConversation>(`/projects/${projectId}/agent/conversations`, { title }),
+
+  getConversation: (projectId: string, conversationId: string) =>
+    api.get<unknown, AgentConversationDetail>(
+      `/projects/${projectId}/agent/conversations/${conversationId}`
+    ),
+
+  deleteConversation: (projectId: string, conversationId: string) =>
+    api.delete(`/projects/${projectId}/agent/conversations/${conversationId}`),
+
+  confirmToolCall: (projectId: string, toolCallId: string) =>
+    api.post<unknown, AgentToolDecision>(
+      `/projects/${projectId}/agent/tool-calls/${toolCallId}/confirm`
+    ),
+
+  rejectToolCall: (projectId: string, toolCallId: string) =>
+    api.post<unknown, AgentToolDecision>(
+      `/projects/${projectId}/agent/tool-calls/${toolCallId}/reject`
+    ),
+
+  chatStream: async (
+    projectId: string,
+    payload: {
+      conversation_id?: string;
+      message: string;
+      page_context?: Record<string, unknown>;
+      auto_approve?: boolean;
+    },
+    callbacks: ProjectAgentStreamCallbacks,
+    signal?: AbortSignal,
+  ) => {
+    const response = await fetch(`/api/projects/${projectId}/agent/chat-stream`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      credentials: 'include',
+      body: JSON.stringify(payload),
+      signal,
+    });
+    if (!response.ok) {
+      let detail = `Yêu cầu thất bại (${response.status})`;
+      try {
+        const body = await response.json();
+        detail = body.detail || detail;
+      } catch {
+        // Giữ lại lỗi trạng thái HTTP.
+      }
+      throw new Error(detail);
+    }
+    if (!response.body) throw new Error('Không thể đọc luồng phản hồi của Trợ lý sáng tác MuMu');
+
+    const reader = response.body.getReader();
+    const decoder = new TextDecoder();
+    let buffer = '';
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      buffer += decoder.decode(value, { stream: true });
+      const blocks = buffer.split('\n\n');
+      buffer = blocks.pop() || '';
+      for (const block of blocks) {
+        const match = block.match(/^data:\s*(.+)$/m);
+        if (!match) continue;
+        const event = JSON.parse(match[1]);
+        if (event.type === 'conversation') callbacks.onConversation?.(event.data);
+        else if (event.type === 'chunk') callbacks.onChunk?.(event.content || '');
+        else if (event.type === 'tool_proposed') callbacks.onToolProposed?.(event.data);
+        else if (event.type === 'tool_executed') callbacks.onToolExecuted?.(event.data);
+        else if (event.type === 'step_start') callbacks.onStepStart?.(event.data);
+        else if (event.type === 'step_update') callbacks.onStepUpdate?.(event.data);
+        else if (event.type === 'final_start') callbacks.onFinalStart?.(event.data);
+        else if (event.type === 'final_chunk') callbacks.onFinalChunk?.(event.content || '');
+        else if (event.type === 'final_done') callbacks.onFinalDone?.(event.data);
+        else if (event.type === 'result') callbacks.onResult?.(event.data);
+        else if (event.type === 'error') {
+          callbacks.onError?.(event.error || 'Trợ lý sáng tác MuMu thực thi thất bại');
+          throw new Error(event.error || 'Trợ lý sáng tác MuMu thực thi thất bại');
+        }
+      }
+    }
+  },
+};

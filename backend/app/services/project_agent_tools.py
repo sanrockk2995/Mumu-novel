@@ -1,0 +1,616 @@
+"""Registry và executor tool nội bộ của project agent."""
+from dataclasses import dataclass
+from datetime import datetime
+import json
+from typing import Any, Awaitable, Callable
+
+from sqlalchemy import or_, select
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from app.models.chapter import Chapter
+from app.models.character import Character
+from app.models.foreshadow import Foreshadow
+from app.models.outline import Outline
+from app.models.project import Project
+from app.models.relationship import CharacterRelationship, Organization
+from app.services.project_agent_extended_tools import (
+    EXTENDED_TOOL_SPECS,
+    READ_TOOL_NAMES,
+    WRITE_TOOL_NAMES,
+    ProjectAgentExtendedTools,
+)
+from app.services.project_agent_operational_tools import (
+    OPERATIONAL_READ_TOOL_NAMES,
+    OPERATIONAL_TOOL_SPECS,
+    OPERATIONAL_WRITE_TOOL_NAMES,
+    ProjectAgentOperationalTools,
+)
+from app.services.project_agent_selectors import (
+    clean_identifier,
+    find_chapter,
+    find_character,
+    find_outline,
+    normalize_tool_arguments,
+)
+
+
+ToolHandler = Callable[[dict[str, Any]], Awaitable[dict[str, Any]]]
+
+
+@dataclass(frozen=True)
+class ProjectAgentTool:
+    name: str
+    description: str
+    parameters: dict[str, Any]
+    risk_level: int = 0
+    resources: tuple[str, ...] = ()
+
+    @property
+    def requires_confirmation(self) -> bool:
+        return self.risk_level >= 2
+
+    def as_model_tool(self) -> dict[str, Any]:
+        return {
+            "type": "function",
+            "function": {
+                "name": self.name,
+                "description": self.description,
+                "parameters": self.parameters,
+            },
+        }
+
+
+def _object_schema(properties: dict[str, Any], required: list[str] | None = None) -> dict[str, Any]:
+    schema: dict[str, Any] = {
+        "type": "object",
+        "properties": properties,
+        "additionalProperties": False,
+    }
+    if required:
+        schema["required"] = required
+    return schema
+
+
+def _selector_schema(properties: dict[str, Any], *selectors: str) -> dict[str, Any]:
+    schema = _object_schema(properties)
+    schema["anyOf"] = [{"required": [selector]} for selector in selectors]
+    return schema
+
+
+def _json_value(value: Any) -> Any:
+    if isinstance(value, datetime):
+        return value.isoformat()
+    return value
+
+
+def normalize_tool_preview(
+    preview: dict[str, Any] | None,
+    arguments: dict[str, Any],
+) -> dict[str, Any] | None:
+    """Loại bỏ các sửa đổi giả do null của tham số tùy chọn chưa cung cấp trong bản xem trước cũ."""
+    if not preview or not isinstance(preview.get("changes"), dict):
+        return preview
+    null_fields = {key for key, value in arguments.items() if value is None}
+    if not null_fields:
+        return preview
+    changes = {
+        key: value
+        for key, value in preview["changes"].items()
+        if key not in null_fields
+    }
+    return {**preview, "changes": changes}
+
+
+class ProjectAgentToolRegistry:
+    """Context thực thi tool được gắn cố định vào project đã xác thực của người dùng hiện tại."""
+
+    PROJECT_FIELDS = {
+        "title", "description", "theme", "genre", "target_words", "status",
+        "world_time_period", "world_location", "world_atmosphere", "world_rules",
+        "chapter_count", "narrative_perspective", "character_count",
+    }
+    OUTLINE_FIELDS = {"title", "content"}
+    CHARACTER_FIELDS = {
+        "name", "age", "gender", "role_type", "personality", "background",
+        "appearance", "status", "traits", "organization_type",
+        "organization_purpose", "avatar_url", "status_changed_chapter",
+        "current_state", "state_updated_chapter",
+    }
+    CHAPTER_FIELDS = {"title", "summary", "status"}
+
+    def __init__(self, project: Project, db: AsyncSession):
+        self.project = project
+        self.db = db
+        self.extended = ProjectAgentExtendedTools(project, db)
+        self.operational = ProjectAgentOperationalTools(project, db)
+        self._tools = {tool.name: tool for tool in self._build_tools()}
+
+    def _build_tools(self) -> list[ProjectAgentTool]:
+        text = {"type": ["string", "null"]}
+        integer = {"type": ["integer", "null"]}
+        required_text = {"type": "string", "minLength": 1, "pattern": r".*\S.*"}
+        identifier = {"type": "string", "minLength": 1, "pattern": r".*\S.*"}
+        tools = [
+            ProjectAgentTool(
+                "get_project_overview",
+                "Lấy thông tin cơ bản, thiết lập thế giới và số lượng dữ liệu của project hiện tại.",
+                _object_schema({}),
+            ),
+            ProjectAgentTool(
+                "list_outlines",
+                "Truy vấn danh sách dàn ý của project hiện tại, có thể lọc theo tiêu đề hoặc từ khóa nội dung.",
+                _object_schema({
+                    "query": {"type": "string"},
+                    "limit": {"type": "integer", "minimum": 1, "maximum": 100},
+                }),
+            ),
+            ProjectAgentTool(
+                "get_outline_detail",
+                "Lấy một dàn ý đầy đủ của project hiện tại theo ID hoặc số thứ tự dàn ý.",
+                _selector_schema({
+                    "outline_id": identifier,
+                    "order_index": {"type": "integer", "minimum": 1},
+                }, "outline_id", "order_index"),
+            ),
+            ProjectAgentTool(
+                "list_characters",
+                "Truy vấn nhân vật hoặc tổ chức của project hiện tại, có thể lọc theo tên.",
+                _object_schema({
+                    "query": {"type": "string"},
+                    "entity_type": {"type": "string", "enum": ["all", "character", "organization"]},
+                    "limit": {"type": "integer", "minimum": 1, "maximum": 100},
+                }),
+            ),
+            ProjectAgentTool(
+                "get_character_detail",
+                "Lấy chi tiết nhân vật/tổ chức của project hiện tại theo ID hoặc tên nhân vật.",
+                _selector_schema({
+                    "character_id": identifier,
+                    "name": {"type": "string"},
+                }, "character_id", "name"),
+            ),
+            ProjectAgentTool(
+                "list_chapters",
+                "Truy vấn danh sách chương và tóm tắt của project hiện tại, không trả về toàn văn.",
+                _object_schema({
+                    "query": {"type": "string"},
+                    "limit": {"type": "integer", "minimum": 1, "maximum": 100},
+                }),
+            ),
+            ProjectAgentTool(
+                "get_chapter_detail",
+                "Lấy chi tiết chương theo ID hoặc số chương, có thể trả về toàn văn.",
+                _selector_schema({
+                    "chapter_id": identifier,
+                    "chapter_number": {"type": "integer", "minimum": 1},
+                    "include_content": {"type": "boolean"},
+                }, "chapter_id", "chapter_number"),
+            ),
+            ProjectAgentTool(
+                "list_relationships",
+                "Truy vấn quan hệ nhân vật của project hiện tại.",
+                _object_schema({"limit": {"type": "integer", "minimum": 1, "maximum": 100}}),
+            ),
+            ProjectAgentTool(
+                "list_foreshadows",
+                "Truy vấn phục bút của project hiện tại, có thể lọc theo trạng thái.",
+                _object_schema({
+                    "status": {"type": "string"},
+                    "limit": {"type": "integer", "minimum": 1, "maximum": 100},
+                }),
+            ),
+            ProjectAgentTool(
+                "update_project",
+                "Chỉnh sửa thông tin cơ bản hoặc thiết lập thế giới của project hiện tại. Sau khi gọi phải chờ người dùng xác nhận.",
+                _object_schema({
+                    "title": required_text, "description": text, "theme": text, "genre": text,
+                    "target_words": integer,
+                    "status": {"type": "string", "enum": ["planning", "writing", "revising", "completed"]},
+                    "world_time_period": text,
+                    "world_location": text, "world_atmosphere": text, "world_rules": text,
+                    "chapter_count": integer, "narrative_perspective": text,
+                    "character_count": integer,
+                }),
+                risk_level=2,
+                resources=("projects",),
+            ),
+            ProjectAgentTool(
+                "update_outline",
+                "Chỉnh sửa tiêu đề và nội dung dàn ý của project hiện tại theo ID hoặc số thứ tự. Sau khi gọi phải chờ người dùng xác nhận.",
+                _selector_schema({
+                    "outline_id": identifier,
+                    "order_index": {"type": "integer", "minimum": 1},
+                    "title": required_text,
+                    "content": text,
+                }, "outline_id", "order_index"),
+                risk_level=2,
+                resources=("outlines", "chapters"),
+            ),
+            ProjectAgentTool(
+                "update_character",
+                "Chỉnh sửa thông tin nhân vật của project hiện tại theo ID hoặc tên. Sau khi gọi phải chờ người dùng xác nhận.",
+                _selector_schema({
+                    "character_id": identifier, "character_name": {"type": "string", "pattern": r".*\S.*"},
+                    "name": required_text, "age": text, "gender": text, "role_type": text,
+                    "personality": text, "background": text, "appearance": text,
+                    "organization_type": text, "organization_purpose": text,
+                    "avatar_url": text, "status_changed_chapter": integer,
+                    "current_state": text, "state_updated_chapter": integer,
+                    "status": {"type": "string", "enum": ["active", "deceased", "missing", "retired", "destroyed"]},
+                    "traits": text,
+                }, "character_id", "character_name"),
+                risk_level=2,
+                resources=("characters",),
+            ),
+            ProjectAgentTool(
+                "update_chapter",
+                "Chỉnh sửa tiêu đề, tóm tắt hoặc trạng thái chương theo ID hoặc số chương, không sửa toàn văn; chỉ truyền các field cần chỉnh sửa,",
+                "field không chỉnh sửa phải lược bỏ, muốn xóa tóm tắt hãy truyền chuỗi rỗng một cách tường minh; chế độ một-một sẽ đồng bộ dàn ý tương ứng.",
+                "Sau khi gọi phải chờ người dùng xác nhận.",
+                _selector_schema({
+                    "chapter_id": identifier,
+                    "chapter_number": {"type": "integer", "minimum": 1},
+                    "title": required_text, "summary": text,
+                    "status": {"type": "string", "enum": ["draft", "pending", "writing", "completed"]},
+                }, "chapter_id", "chapter_number"),
+                risk_level=2,
+                resources=("chapters", "outlines"),
+            ),
+        ]
+        tools.extend(ProjectAgentTool(**spec) for spec in EXTENDED_TOOL_SPECS)
+        tools.extend(ProjectAgentTool(**spec) for spec in OPERATIONAL_TOOL_SPECS)
+        return tools
+
+    def definitions(self) -> list[dict[str, Any]]:
+        return [tool.as_model_tool() for tool in self._tools.values()]
+
+    def get(self, name: str) -> ProjectAgentTool:
+        tool = self._tools.get(name)
+        if tool is None:
+            raise ValueError(f"Tool project chưa đăng ký: {name}")
+        return tool
+
+    async def preview(self, name: str, arguments: dict[str, Any]) -> dict[str, Any]:
+        arguments = normalize_tool_arguments(arguments)
+        tool = self.get(name)
+        if not tool.requires_confirmation:
+            raise ValueError("Tool chỉ đọc không cần xem trước chỉnh sửa")
+        if name in WRITE_TOOL_NAMES:
+            return await self.extended.preview(name, arguments)
+        if name in OPERATIONAL_WRITE_TOOL_NAMES:
+            return await self.operational.preview(name, arguments)
+        entity, fields, label = await self._resolve_update(name, arguments)
+        changes = {
+            field: {"before": _json_value(getattr(entity, field)), "after": _json_value(value)}
+            for field, value in fields.items()
+            if getattr(entity, field) != value
+        }
+        if not changes:
+            raise ValueError("Không phát hiện field cần chỉnh sửa")
+        return {
+            "entity_type": entity.__class__.__name__.lower(),
+            "entity_id": entity.id,
+            "label": label,
+            "changes": changes,
+            "resources": list(tool.resources),
+        }
+
+    async def execute(self, name: str, arguments: dict[str, Any]) -> dict[str, Any]:
+        arguments = normalize_tool_arguments(arguments)
+        tool = self.get(name)
+        if tool.requires_confirmation:
+            if name in WRITE_TOOL_NAMES:
+                return await self.extended.execute(name, arguments)
+            if name in OPERATIONAL_WRITE_TOOL_NAMES:
+                return await self.operational.execute(name, arguments)
+            entity, fields, label = await self._resolve_update(name, arguments)
+            before = {field: _json_value(getattr(entity, field)) for field in fields}
+            for field, value in fields.items():
+                setattr(entity, field, value)
+
+            if isinstance(entity, Outline):
+                self._sync_outline_structure(entity)
+                if self.project.outline_mode == "one-to-one":
+                    chapter_result = await self.db.execute(
+                        select(Chapter).where(
+                            Chapter.project_id == self.project.id,
+                            Chapter.chapter_number == entity.order_index,
+                        )
+                    )
+                    chapter = chapter_result.scalar_one_or_none()
+                    if chapter:
+                        if "title" in fields:
+                            chapter.title = entity.title
+                        if "content" in fields:
+                            chapter.summary = entity.content
+
+            if isinstance(entity, Chapter) and self.project.outline_mode == "one-to-one":
+                outline = await self._find_outline_for_one_to_one_chapter(entity)
+                if outline:
+                    if "title" in fields:
+                        outline.title = entity.title
+                    if "summary" in fields:
+                        outline.content = entity.summary or ""
+                    if "title" in fields or "summary" in fields:
+                        self._sync_outline_structure(outline)
+
+            await self.db.flush()
+            after = {field: _json_value(getattr(entity, field)) for field in fields}
+            return {
+                "message": f"Đã cập nhật {self._entity_label(entity)}",
+                "entity_id": entity.id,
+                "before": before,
+                "after": after,
+                "resources": list(tool.resources),
+            }
+
+        if name in READ_TOOL_NAMES:
+            return await self.extended.read(name, arguments)
+        if name in OPERATIONAL_READ_TOOL_NAMES:
+            return await self.operational.read(name, arguments)
+        handler: ToolHandler = getattr(self, f"_{name}", None)
+        if handler is None:
+            raise ValueError(f"Tool chưa được triển khai: {name}")
+        return await handler(arguments)
+
+    async def _resolve_update(
+        self,
+        name: str,
+        arguments: dict[str, Any],
+    ) -> tuple[Any, dict[str, Any], str]:
+        if name == "update_project":
+            fields = self._pick_fields(arguments, self.PROJECT_FIELDS)
+            self._validate_update_fields(name, fields)
+            return self.project, fields, self._entity_label(self.project)
+        if name == "update_outline":
+            entity = await self._find_outline(arguments)
+            fields = self._pick_fields(arguments, self.OUTLINE_FIELDS)
+            self._validate_update_fields(name, fields)
+            return entity, fields, self._entity_label(entity)
+        if name == "update_character":
+            entity = await self._find_character(arguments)
+            fields = self._pick_fields(arguments, self.CHARACTER_FIELDS)
+            self._validate_update_fields(name, fields)
+            return entity, fields, self._entity_label(entity)
+        if name == "update_chapter":
+            entity = await self._find_chapter(arguments)
+            fields = self._pick_fields(arguments, self.CHAPTER_FIELDS)
+            self._validate_update_fields(name, fields)
+            return entity, fields, self._entity_label(entity)
+        raise ValueError(f"Tool ghi không được hỗ trợ: {name}")
+
+    @staticmethod
+    def _entity_label(entity: Any) -> str:
+        if isinstance(entity, Project):
+            return f"Project《{entity.title}》"
+        if isinstance(entity, Outline):
+            return f"Dàn ý《{entity.title}》"
+        if isinstance(entity, Character):
+            return f"Nhân vật《{entity.name}》"
+        if isinstance(entity, Chapter):
+            return f"Chương {entity.chapter_number}《{entity.title}》"
+        return entity.__class__.__name__
+
+    @staticmethod
+    def _pick_fields(arguments: dict[str, Any], allowed: set[str]) -> dict[str, Any]:
+        # Một số model sẽ điền null cho tham số tùy chọn chưa dùng. null nghĩa là "chưa cung cấp", không được
+        # coi là thao tác xóa, nếu không khi chỉ sửa tiêu đề sẽ vô tình xóa tóm tắt và các field hiện có. Xóa văn bản dùng
+        # chuỗi rỗng tường minh, vẫn giữ trong fields và vào xem trước chỉnh sửa.
+        fields = {
+            key: value
+            for key, value in arguments.items()
+            if key in allowed and value is not None
+        }
+        if not fields:
+            raise ValueError("Thiếu field có thể chỉnh sửa")
+        return fields
+
+    @staticmethod
+    def _validate_update_fields(name: str, fields: dict[str, Any]) -> None:
+        required_text_fields = {
+            "update_project": {"title": 200},
+            "update_outline": {"title": 200},
+            "update_character": {"name": 100},
+            "update_chapter": {"title": 200},
+        }[name]
+        for field, max_length in required_text_fields.items():
+            if field not in fields:
+                continue
+            value = fields[field]
+            if not isinstance(value, str) or not value.strip():
+                raise ValueError(f"{field} không được để trống")
+            if len(value) > max_length:
+                raise ValueError(f"{field} không được vượt quá {max_length} ký tự")
+
+        status_values = {
+            "update_project": {"planning", "writing", "revising", "completed"},
+            "update_character": {"active", "deceased", "missing", "retired", "destroyed"},
+            "update_chapter": {"draft", "pending", "writing", "completed"},
+        }
+        if "status" in fields and name in status_values and fields["status"] not in status_values[name]:
+            raise ValueError("status không phải giá trị trạng thái được hỗ trợ")
+
+        if name == "update_project":
+            for field in ("target_words", "chapter_count", "character_count"):
+                value = fields.get(field)
+                if value is not None and (not isinstance(value, int) or isinstance(value, bool) or value < 0):
+                    raise ValueError(f"{field} phải là số nguyên không âm")
+        if name == "update_character":
+            for field in ("status_changed_chapter", "state_updated_chapter"):
+                value = fields.get(field)
+                if value is not None and (not isinstance(value, int) or isinstance(value, bool) or value < 1):
+                    raise ValueError(f"{field} phải là số nguyên dương hoặc null")
+
+    async def _find_outline(self, arguments: dict[str, Any]) -> Outline:
+        return await find_outline(self.db, self.project.id, arguments)
+
+    async def _find_character(self, arguments: dict[str, Any]) -> Character:
+        return await find_character(self.db, self.project.id, arguments)
+
+    async def _find_chapter(self, arguments: dict[str, Any]) -> Chapter:
+        return await find_chapter(self.db, self.project.id, arguments)
+
+    async def _find_outline_for_one_to_one_chapter(
+        self,
+        chapter: Chapter,
+    ) -> Outline | None:
+        if chapter.outline_id:
+            result = await self.db.execute(
+                select(Outline).where(
+                    Outline.id == chapter.outline_id,
+                    Outline.project_id == self.project.id,
+                )
+            )
+            outline = result.scalar_one_or_none()
+            if outline:
+                return outline
+        result = await self.db.execute(
+            select(Outline).where(
+                Outline.project_id == self.project.id,
+                Outline.order_index == chapter.chapter_number,
+            )
+        )
+        return result.scalar_one_or_none()
+
+    @staticmethod
+    def _sync_outline_structure(outline: Outline) -> None:
+        try:
+            structure = json.loads(outline.structure) if outline.structure else {}
+        except json.JSONDecodeError:
+            structure = {}
+        if not isinstance(structure, dict):
+            structure = {}
+        structure["title"] = outline.title
+        structure["summary"] = outline.content
+        structure["content"] = outline.content
+        outline.structure = json.dumps(structure, ensure_ascii=False)
+
+    async def _get_project_overview(self, _: dict[str, Any]) -> dict[str, Any]:
+        counts: dict[str, int] = {}
+        for key, model in (
+            ("outlines", Outline), ("characters", Character), ("chapters", Chapter),
+            ("organizations", Organization), ("relationships", CharacterRelationship),
+            ("foreshadows", Foreshadow),
+        ):
+            result = await self.db.execute(select(model.id).where(model.project_id == self.project.id))
+            counts[key] = len(result.scalars().all())
+        return {
+            "project": {
+                "id": self.project.id, "title": self.project.title,
+                "description": self.project.description, "theme": self.project.theme,
+                "genre": self.project.genre, "status": self.project.status,
+                "outline_mode": self.project.outline_mode,
+                "target_words": self.project.target_words,
+                "current_words": self.project.current_words,
+                "world_time_period": self.project.world_time_period,
+                "world_location": self.project.world_location,
+                "world_atmosphere": self.project.world_atmosphere,
+                "world_rules": self.project.world_rules,
+            },
+            "counts": counts,
+        }
+
+    async def _list_outlines(self, arguments: dict[str, Any]) -> dict[str, Any]:
+        limit = min(max(int(arguments.get("limit", 50)), 1), 100)
+        query = select(Outline).where(Outline.project_id == self.project.id)
+        keyword = str(arguments.get("query") or "").strip()
+        if keyword:
+            pattern = f"%{keyword}%"
+            query = query.where(or_(Outline.title.ilike(pattern), Outline.content.ilike(pattern)))
+        rows = (await self.db.execute(query.order_by(Outline.order_index).limit(limit))).scalars().all()
+        return {"total": len(rows), "items": [
+            {"id": row.id, "order_index": row.order_index, "title": row.title, "content": row.content}
+            for row in rows
+        ]}
+
+    async def _get_outline_detail(self, arguments: dict[str, Any]) -> dict[str, Any]:
+        row = await self._find_outline(arguments)
+        return {"id": row.id, "order_index": row.order_index, "title": row.title,
+                "content": row.content, "structure": row.structure}
+
+    async def _list_characters(self, arguments: dict[str, Any]) -> dict[str, Any]:
+        limit = min(max(int(arguments.get("limit", 50)), 1), 100)
+        query = select(Character).where(Character.project_id == self.project.id)
+        keyword = str(arguments.get("query") or "").strip()
+        if keyword:
+            query = query.where(Character.name.ilike(f"%{keyword}%"))
+        entity_type = arguments.get("entity_type", "all")
+        if entity_type == "character":
+            query = query.where(Character.is_organization.is_(False))
+        elif entity_type == "organization":
+            query = query.where(Character.is_organization.is_(True))
+        rows = (await self.db.execute(query.order_by(Character.created_at).limit(limit))).scalars().all()
+        return {"total": len(rows), "items": [self._character_data(row, compact=True) for row in rows]}
+
+    async def _get_character_detail(self, arguments: dict[str, Any]) -> dict[str, Any]:
+        lookup = dict(arguments)
+        if lookup.get("name") and not lookup.get("character_name"):
+            lookup["character_name"] = lookup["name"]
+        return self._character_data(await self._find_character(lookup), compact=False)
+
+    @staticmethod
+    def _character_data(row: Character, compact: bool) -> dict[str, Any]:
+        data = {"id": row.id, "name": row.name, "is_organization": row.is_organization,
+                "role_type": row.role_type, "status": row.status, "personality": row.personality}
+        if not compact:
+            data.update({"age": row.age, "gender": row.gender, "background": row.background,
+                         "appearance": row.appearance, "traits": row.traits,
+                         "current_state": row.current_state})
+        return data
+
+    async def _list_chapters(self, arguments: dict[str, Any]) -> dict[str, Any]:
+        limit = min(max(int(arguments.get("limit", 50)), 1), 100)
+        query = select(Chapter).where(Chapter.project_id == self.project.id)
+        keyword = str(arguments.get("query") or "").strip()
+        if keyword:
+            pattern = f"%{keyword}%"
+            query = query.where(or_(Chapter.title.ilike(pattern), Chapter.summary.ilike(pattern)))
+        rows = (await self.db.execute(query.order_by(Chapter.chapter_number).limit(limit))).scalars().all()
+        return {"total": len(rows), "items": [
+            {"id": row.id, "chapter_number": row.chapter_number, "title": row.title,
+             "summary": row.summary, "status": row.status, "word_count": row.word_count}
+            for row in rows
+        ]}
+
+    async def _get_chapter_detail(self, arguments: dict[str, Any]) -> dict[str, Any]:
+        row = await self._find_chapter(arguments)
+        data = {"id": row.id, "chapter_number": row.chapter_number, "title": row.title,
+                "summary": row.summary, "status": row.status, "word_count": row.word_count}
+        if arguments.get("include_content", True):
+            content = row.content or ""
+            data["content"] = content[:50000]
+            data["content_truncated"] = len(content) > 50000
+        return data
+
+    async def _list_relationships(self, arguments: dict[str, Any]) -> dict[str, Any]:
+        limit = min(max(int(arguments.get("limit", 50)), 1), 100)
+        rows = (await self.db.execute(
+            select(CharacterRelationship)
+            .where(CharacterRelationship.project_id == self.project.id)
+            .order_by(CharacterRelationship.created_at)
+            .limit(limit)
+        )).scalars().all()
+        char_rows = (await self.db.execute(
+            select(Character).where(Character.project_id == self.project.id)
+        )).scalars().all()
+        names = {row.id: row.name for row in char_rows}
+        return {"total": len(rows), "items": [
+            {"id": row.id, "from": names.get(row.character_from_id),
+             "to": names.get(row.character_to_id), "relationship_name": row.relationship_name,
+             "intimacy_level": row.intimacy_level, "status": row.status,
+             "description": row.description}
+            for row in rows
+        ]}
+
+    async def _list_foreshadows(self, arguments: dict[str, Any]) -> dict[str, Any]:
+        limit = min(max(int(arguments.get("limit", 50)), 1), 100)
+        query = select(Foreshadow).where(Foreshadow.project_id == self.project.id)
+        if arguments.get("status"):
+            query = query.where(Foreshadow.status == arguments["status"])
+        rows = (await self.db.execute(query.order_by(Foreshadow.created_at).limit(limit))).scalars().all()
+        return {"total": len(rows), "items": [
+            {"id": row.id, "title": row.title, "content": row.content,
+             "status": row.status, "importance": row.importance,
+             "target_resolve_chapter_number": row.target_resolve_chapter_number}
+            for row in rows
+        ]}

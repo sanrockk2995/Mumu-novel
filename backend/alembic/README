@@ -1,0 +1,145 @@
+# Hướng dẫn migration database Alembic
+
+Dự án này hỗ trợ hai database **PostgreSQL** và **SQLite**, dùng cấu hình Alembic độc lập để quản lý migration.
+
+## 📁 Cấu trúc thư mục
+
+```
+backend/
+├── alembic-postgres.ini       # File cấu hình PostgreSQL
+├── alembic-sqlite.ini         # File cấu hình SQLite
+├── alembic/
+│   ├── postgres/              # Thư mục script migration PostgreSQL
+│   │   ├── env.py
+│   │   ├── script.py.mako
+│   │   └── versions/          # Phiên bản migration PostgreSQL
+│   │       ├── 20251226_1008_ee0a189f1532_初始数据库结构.py
+│   │       └── 20251226_1102_e411428f00c0_初始化预置数据.py
+│   └── sqlite/                # Thư mục script migration SQLite
+│       ├── env.py
+│       ├── script.py.mako
+│       └── versions/          # Phiên bản migration SQLite
+│           └── 20251226_1322_fbeb1038c728_初始化sqlite数据库.py
+```
+
+## 🚀 Cách sử dụng
+
+### 1. Database PostgreSQL
+
+#### Cấu hình biến môi trường
+```bash
+# File .env
+DATABASE_URL=postgresql+asyncpg://username:password@localhost:5432/database_name
+```
+
+#### Sinh script migration
+```bash
+cd backend
+alembic -c alembic-postgres.ini revision --autogenerate -m "thông tin mô tả"
+```
+
+#### Áp dụng migration
+```bash
+alembic -c alembic-postgres.ini upgrade head
+```
+
+#### Rollback migration
+```bash
+alembic -c alembic-postgres.ini downgrade -1
+```
+
+#### Xem lịch sử migration
+```bash
+alembic -c alembic-postgres.ini history
+alembic -c alembic-postgres.ini current
+```
+
+### 2. Database SQLite
+
+#### Cấu hình biến môi trường
+```bash
+# File .env
+DATABASE_URL=sqlite+aiosqlite:///./data/mumuai.db
+```
+
+#### Sinh script migration
+```bash
+cd backend
+alembic -c alembic-sqlite.ini revision --autogenerate -m "thông tin mô tả"
+```
+
+#### Áp dụng migration
+```bash
+alembic -c alembic-sqlite.ini upgrade head
+```
+
+#### Rollback migration
+```bash
+alembic -c alembic-sqlite.ini downgrade -1
+```
+
+#### Xem lịch sử migration
+```bash
+alembic -c alembic-sqlite.ini history
+alembic -c alembic-sqlite.ini current
+```
+
+## ⚙️ Khác biệt cấu hình then chốt
+
+### PostgreSQL (alembic/postgres/env.py)
+- `render_as_batch=False` - hỗ trợ trực tiếp ALTER TABLE
+- Dùng `server_default=sa.text('now()')` 
+
+### SQLite (alembic/sqlite/env.py)
+- `render_as_batch=True` - thực hiện ALTER TABLE bằng cách rebuild bảng
+- Dùng `server_default=sa.text('(CURRENT_TIMESTAMP)')` - định dạng SQLite
+
+## 📝 Lưu ý
+
+### Hạn chế của SQLite
+1. **Ghi đồng thời**: cùng lúc chỉ cho phép một thao tác ghi
+2. **Hạn chế ALTER TABLE**: một số thao tác cần rebuild bảng (chế độ batch của Alembic sẽ tự xử lý)
+3. **Ánh xạ kiểu**:
+   - `JSON` → `TEXT` (SQLAlchemy tự xử lý)
+   - `BOOLEAN` → `INTEGER` (0/1)
+   - `DEFAULT now()` → `DEFAULT CURRENT_TIMESTAMP`
+
+### Ưu điểm của PostgreSQL
+1. **Hỗ trợ đồng thời cao**: nhiều người dùng đọc ghi cùng lúc
+2. **Hỗ trợ đầy đủ ALTER TABLE**
+3. **Tính năng nâng cao**: tìm kiếm toàn văn, toán tử JSON, kiểu mảng...
+
+## 🔄 Chuyển đổi database
+
+Chỉ cần sửa `DATABASE_URL` trong file `.env`, rồi dùng file cấu hình tương ứng để thực thi migration:
+
+```bash
+# Chuyển sang SQLite
+DATABASE_URL=sqlite+aiosqlite:///./data/mumuai.db
+alembic -c alembic-sqlite.ini upgrade head
+
+# Chuyển sang PostgreSQL
+DATABASE_URL=postgresql+asyncpg://user:pass@localhost:5432/db
+alembic -c alembic-postgres.ini upgrade head
+```
+
+## 💡 Thực hành tốt nhất
+
+1. **Môi trường phát triển**: dùng SQLite (đơn giản, không cần dịch vụ phụ trợ)
+2. **Môi trường production**: dùng PostgreSQL (hiệu năng, đồng thời, ổn định)
+3. **Giữ đồng bộ**: định nghĩa model của hai database phải nhất quán
+4. **Kiểm tra migration**: kiểm tra script migration trên cả hai database
+
+## 🐛 Câu hỏi thường gặp
+
+### Q: Script migration sau khi sinh có dùng chung được không?
+A: Không. Script migration của PostgreSQL và SQLite là độc lập, vì:
+- Khác biệt cú pháp SQL (như giá trị DEFAULT)
+- Khác biệt kiểu (như JSON, BOOLEAN)
+- Khác biệt khả năng ALTER TABLE
+
+### Q: Làm thế nào để chuyển dữ liệu từ PostgreSQL sang SQLite?
+A: Cần viết script xuất/nhập dữ liệu, không thể tái sử dụng trực tiếp script migration.
+
+### Q: Tại sao migration SQLite chậm như vậy?
+A: Hạn chế ALTER TABLE của SQLite khiến phải rebuild bảng, điều này rất chậm với bảng lớn.

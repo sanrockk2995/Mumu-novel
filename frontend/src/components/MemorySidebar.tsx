@@ -1,0 +1,254 @@
+import React, { useMemo, useEffect, useRef } from 'react';
+import { Card, Tag, Badge, Empty, Collapse, Divider, theme } from 'antd';
+import {
+  FireOutlined,
+  StarOutlined,
+  ThunderboltOutlined,
+  UserOutlined,
+} from '@ant-design/icons';
+import type { MemoryAnnotation } from './AnnotatedText';
+
+const { Panel } = Collapse;
+
+interface MemorySidebarProps {
+  annotations: MemoryAnnotation[];
+  activeAnnotationId?: string;
+  onAnnotationClick?: (annotation: MemoryAnnotation) => void;
+  scrollToAnnotation?: string;
+}
+
+// Cấu hình kiểu
+const TYPE_CONFIG = {
+  hook: {
+    label: 'Hook',
+    icon: <FireOutlined />,
+  },
+  foreshadow: {
+    label: 'Phục bút',
+    icon: <StarOutlined />,
+  },
+  plot_point: {
+    label: 'Điểm cốt truyện',
+    icon: <ThunderboltOutlined />,
+  },
+  character_event: {
+    label: 'Sự kiện nhân vật',
+    icon: <UserOutlined />,
+  },
+};
+
+/**
+ * Component sidebar ký ức
+ * Hiển thị tất cả chú thích ký ức của chương
+ */
+const MemorySidebar: React.FC<MemorySidebarProps> = ({
+  annotations,
+  activeAnnotationId,
+  onAnnotationClick,
+  scrollToAnnotation,
+}) => {
+  const { token } = theme.useToken();
+  const cardRefs = useRef<Record<string, HTMLDivElement | null>>({});
+  const typeColors: Record<keyof typeof TYPE_CONFIG, string> = {
+    hook: token.colorError,
+    foreshadow: token.colorInfo,
+    plot_point: token.colorSuccess,
+    character_event: token.colorWarning,
+  };
+
+  // Khi cần cuộn đến thẻ chú thích cụ thể
+  useEffect(() => {
+    if (scrollToAnnotation && cardRefs.current[scrollToAnnotation]) {
+      const element = cardRefs.current[scrollToAnnotation];
+      element?.scrollIntoView({
+        behavior: 'smooth',
+        block: 'center',
+      });
+    }
+  }, [scrollToAnnotation]);
+  // Nhóm theo kiểu
+  const groupedAnnotations = useMemo(() => {
+    const groups: Record<string, MemoryAnnotation[]> = {
+      hook: [],
+      foreshadow: [],
+      plot_point: [],
+      character_event: [],
+    };
+
+    annotations.forEach((annotation) => {
+      if (groups[annotation.type]) {
+        groups[annotation.type].push(annotation);
+      }
+    });
+
+    // Mỗi nhóm sắp xếp theo mức quan trọng
+    Object.keys(groups).forEach((type) => {
+      groups[type].sort((a, b) => b.importance - a.importance);
+    });
+
+    return groups;
+  }, [annotations]);
+
+  // Thông tin thống kê
+  const stats = useMemo(() => {
+    return {
+      total: annotations.length,
+      hooks: groupedAnnotations.hook.length,
+      foreshadows: groupedAnnotations.foreshadow.length,
+      plotPoints: groupedAnnotations.plot_point.length,
+      characterEvents: groupedAnnotations.character_event.length,
+    };
+  }, [annotations, groupedAnnotations]);
+
+  // Render một thẻ ký ức
+  const renderMemoryCard = (annotation: MemoryAnnotation) => {
+    const config = TYPE_CONFIG[annotation.type];
+    const color = typeColors[annotation.type];
+    const isActive = activeAnnotationId === annotation.id;
+
+    return (
+      <div
+        key={annotation.id}
+        ref={(el) => {
+          cardRefs.current[annotation.id] = el;
+        }}
+      >
+        <Card
+          size="small"
+          hoverable
+          onClick={() => onAnnotationClick?.(annotation)}
+          style={{
+            marginBottom: 12,
+            borderLeft: `4px solid ${color}`,
+            backgroundColor: isActive ? `color-mix(in srgb, ${color} 8%, transparent)` : 'transparent',
+            cursor: 'pointer',
+            transition: 'all 0.2s',
+          }}
+          bodyStyle={{ padding: 12 }}
+        >
+        <div style={{ marginBottom: 8 }}>
+          <Badge
+            count={`${(annotation.importance * 10).toFixed(1)}`}
+            style={{
+              backgroundColor: color,
+              float: 'right',
+            }}
+          />
+          <div style={{ fontWeight: 600, fontSize: 14, paddingRight: 50 }}>
+            {config.icon} {annotation.title}
+          </div>
+        </div>
+
+        <div
+          style={{
+            fontSize: 13,
+            color: token.colorTextSecondary,
+            lineHeight: 1.6,
+            marginBottom: 8,
+          }}
+        >
+          {annotation.content.length > 100
+            ? `${annotation.content.slice(0, 100)}...`
+            : annotation.content}
+        </div>
+
+        {annotation.tags && annotation.tags.length > 0 && (
+          <div>
+            {annotation.tags.map((tag, index) => (
+              <Tag key={index} style={{ fontSize: 11, margin: '2px 4px 2px 0' }}>
+                {tag}
+              </Tag>
+            ))}
+          </div>
+        )}
+
+        {/* Metadata đặc biệt */}
+        {annotation.metadata.strength && (
+          <div style={{ marginTop: 4, fontSize: 11, color: token.colorTextTertiary }}>
+            Cường độ: {annotation.metadata.strength}/10
+          </div>
+        )}
+        {annotation.metadata.foreshadowType && (
+          <Tag
+            color={annotation.metadata.foreshadowType === 'planted' ? 'blue' : 'green'}
+            style={{ marginTop: 4 }}
+          >
+            {annotation.metadata.foreshadowType === 'planted' ? 'Đã gieo' : 'Đã thu hồi'}
+          </Tag>
+        )}
+        </Card>
+      </div>
+    );
+  };
+
+  if (annotations.length === 0) {
+    return (
+      <div style={{ padding: 24 }}>
+        <Empty description="Chưa có dữ liệu phân tích" />
+      </div>
+    );
+  }
+
+  return (
+    <div style={{ height: '100%', overflowY: 'auto', padding: '16px' }}>
+      {/* Tổng quan thống kê */}
+      <Card size="small" style={{ marginBottom: 16 }}>
+        <div style={{ fontWeight: 600, marginBottom: 12 }}>📊 Tổng quan phân tích</div>
+        <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 8 }}>
+          <div>
+            <div style={{ fontSize: 12, color: token.colorTextTertiary }}>Hook</div>
+            <div style={{ fontSize: 20, fontWeight: 600, color: typeColors.hook }}>
+              {stats.hooks}
+            </div>
+          </div>
+          <div>
+            <div style={{ fontSize: 12, color: token.colorTextTertiary }}>Phục bút</div>
+            <div style={{ fontSize: 20, fontWeight: 600, color: typeColors.foreshadow }}>
+              {stats.foreshadows}
+            </div>
+          </div>
+          <div>
+            <div style={{ fontSize: 12, color: token.colorTextTertiary }}>Điểm cốt truyện</div>
+            <div style={{ fontSize: 20, fontWeight: 600, color: typeColors.plot_point }}>
+              {stats.plotPoints}
+            </div>
+          </div>
+          <div>
+            <div style={{ fontSize: 12, color: token.colorTextTertiary }}>Sự kiện nhân vật</div>
+            <div
+              style={{ fontSize: 20, fontWeight: 600, color: typeColors.character_event }}
+            >
+              {stats.characterEvents}
+            </div>
+          </div>
+        </div>
+      </Card>
+
+      <Divider style={{ margin: '16px 0' }} />
+
+      {/* Hiển thị theo phân loại */}
+      <Collapse defaultActiveKey={['hook', 'foreshadow', 'plot_point']} ghost>
+        {Object.entries(groupedAnnotations).map(([type, items]) => {
+          if (items.length === 0) return null;
+
+          const config = TYPE_CONFIG[type as keyof typeof TYPE_CONFIG];
+
+          return (
+            <Panel
+              key={type}
+              header={
+                <span style={{ fontWeight: 600 }}>
+                  {config.icon} {config.label} ({items.length})
+                </span>
+              }
+            >
+              {items.map((annotation) => renderMemoryCard(annotation))}
+            </Panel>
+          );
+        })}
+      </Collapse>
+    </div>
+  );
+};
+
+export default MemorySidebar;
